@@ -1,0 +1,54 @@
+"""
+Database models for Mjolnir.
+Defines the schema for tracking users, play sessions, and settings.
+"""
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Optional
+
+
+@dataclass
+class User:
+    """Represents a Discord user being tracked."""
+    user_id: int  # Discord user ID
+    opted_in: bool = False
+    created_at: Optional[datetime] = None
+
+    def __post_init__(self):
+        if self.created_at is None:
+            self.created_at = datetime.now(timezone.utc)
+
+
+@dataclass
+class PlaySession:
+    """Represents a single play session."""
+    id: Optional[int] = None
+    user_id: int = 0
+    game_name: str = ""
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    duration_seconds: int = 0
+
+    def __post_init__(self):
+        if self.start_time is None:
+            self.start_time = datetime.now(timezone.utc)
+
+    @property
+    def duration_hours(self) -> float:
+        """Returns duration in hours."""
+        return self.duration_seconds / 3600
+
+    @property
+    def is_active(self) -> bool:
+        """Returns True if session is still ongoing."""
+        return self.end_time is None
+
+
+@dataclass
+class BotSettings:
+    """Global bot settings."""
+    tracking_enabled: bool = True
+    target_game: str = "League of Legends"
+    weekly_threshold_hours: float = 20.0
+    timeout_duration_hours: int = 24
+    announcement_channel_id: Optional[int] = None
