@@ -62,7 +62,7 @@ mjolnir
 
 ---
 
-## 📋 Commands
+## Commands
 
 ### User Commands
 - `/opt-in` - Start tracking your playtime
@@ -75,7 +75,7 @@ mjolnir
 
 ---
 
-## ⚙️ Default Settings
+## Default Settings
 
 Settings are stored in the database and can be modified:
 
@@ -87,7 +87,7 @@ These defaults can be changed in the database or through future admin commands (
 
 ---
 
-## 🔨 How It Works
+## How It Works
 
 1. **Opt-in System:** Users run `/opt-in` to consent to tracking
 2. **Presence Monitoring:** Bot watches for when opted-in users play the target game
@@ -98,7 +98,7 @@ These defaults can be changed in the database or through future admin commands (
 
 ---
 
-## 🗺️ Development Roadmap
+## Development Roadmap
 
 ### **Phase 1: Core Functionality** COMPLETE
 **Goal:** Get basic tracking and timeouts working
