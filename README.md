@@ -165,7 +165,7 @@ These defaults can be changed in the database or through future admin commands (
 
 ---
 
-### **Phase 3: Cosmetic Features & Polish** 🎨 FUTURE
+### **Phase 3: Cosmetic Features & Polish** FUTURE
 **Goal:** Improve user experience and add fun features
 
 **Planned Features:**
