@@ -1,5 +1,5 @@
 # Mjolnir (Phase 1 - MVP)
-**The Ban Hammer with a Stopwatch** ⚡
+**The Ban Hammer with a Stopwatch**
 
 Mjolnir is a Discord bot that tracks playtime for a target game (default: *League of Legends*) and enforces configurable limits with **automatic timeouts** instead of bans.
 
