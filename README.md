@@ -9,6 +9,7 @@ Mjolnir is a Discord bot that tracks playtime for a target game (default: *Leagu
 
 - **Playtime Tracking** – Records how long opted-in members play the target game
 - **Automatic Timeouts** – Users who exceed weekly limits get timed out (not banned!)
+- **Playtime Visibility** – `/mystats` shows users their weekly hours, progress bar, and remaining headroom
 - **Consent-Based** – Users must `/opt-in` before tracking starts
 - **Admin Controls** – `/hammer on|off|status` to enable/disable tracking globally
 - **SQLite Persistence** – Stores sessions and settings locally
@@ -67,6 +68,7 @@ mjolnir
 ### User Commands
 - `/opt-in` - Start tracking your playtime
 - `/opt-out` - Stop tracking your playtime
+- `/mystats` - View your weekly playtime, progress toward the limit, and active session info
 
 ### Admin Commands (Requires Administrator permission)
 - `/hammer on` - Enable playtime tracking globally
@@ -112,6 +114,7 @@ These defaults can be changed in the database or through future admin commands (
 - Users can opt-in/opt-out (`/opt-in`, `/opt-out`)
 - Automatic timeout enforcement (not bans - easier to manage!)
 - Basic DM notification on timeout
+- User stats command (`/mystats`) with progress bar and live session tracking
 
 **Tech Stack:**
 - Discord.py 2.x with slash commands
@@ -171,11 +174,8 @@ These defaults can be changed in the database or through future admin commands (
 **Planned Features:**
 
 **1. User Stats & Dashboard**
-- `/mystats` - See your current playtime
-  - Hours played today/this week
-  - Time until next threshold
-  - Total sessions this week
-  - Current warning status
+- `/mystats` - ✅ Basic version implemented in Phase 1 (weekly hours, progress bar, active session)
+  - *Still planned:* daily breakdown, total session count, warning status display
 - `/leaderboard` - Server-wide playtime rankings (opt-in only)
   - Most hours played
   - Longest single session

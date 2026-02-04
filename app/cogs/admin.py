@@ -3,6 +3,7 @@ Admin cog for Mjolnir.
 Provides commands for users to opt-in/out and admins to control the bot.
 """
 import discord
+from datetime import datetime, timezone
 from discord import app_commands
 from discord.ext import commands
 
@@ -51,6 +52,71 @@ class Admin(commands.Cog):
         )
 
         print(f"👋 {interaction.user.name} opted out of tracking")
+
+    @app_commands.command(name="mystats", description="View your weekly playtime stats")
+    async def mystats(self, interaction: discord.Interaction):
+        """Show the invoking user their current weekly playtime and remaining headroom."""
+        user = self.db.get_user(interaction.user.id)
+        if user is None or not user.opted_in:
+            await interaction.response.send_message(
+                "You're not currently opted in to playtime tracking.\n"
+                "Use `/opt-in` to start!",
+                ephemeral=True
+            )
+            return
+
+        settings = self.db.get_settings()
+        threshold = settings.weekly_threshold_hours
+
+        # Completed sessions only — active sessions have no end_time yet
+        weekly_hours = self.db.get_weekly_playtime(interaction.user.id)
+
+        # If there's a live session, add its elapsed time on top
+        active_session = self.db.get_active_session(interaction.user.id, settings.target_game)
+        if active_session:
+            elapsed = (datetime.now(timezone.utc) - active_session.start_time).total_seconds()
+            weekly_hours += elapsed / 3600
+
+        # Progress bar: 20 chars of █/░, capped at full
+        bar_length = 20
+        filled = min(int((weekly_hours / threshold) * bar_length), bar_length)
+        bar = "█" * filled + "░" * (bar_length - filled)
+
+        # Color shifts as the user approaches the threshold
+        if weekly_hours >= threshold:
+            color = discord.Color.red()
+        elif weekly_hours >= threshold * 0.75 and weekly_hours < threshold:
+            color = discord.Color.orange()
+        elif weekly_hours >= threshold * 0.5 and weekly_hours < threshold * 0.75:
+            color = discord.Color.gold()
+        else:
+            color = discord.Color.green()
+
+        remaining = max(threshold - weekly_hours, 0.0)
+
+        embed = discord.Embed(title="📊 Your Weekly Playtime", color=color)
+
+        embed.add_field(
+            name=settings.target_game,
+            value=f"{bar}\n**{weekly_hours:.1f}** / **{threshold}** hours",
+            inline=False
+        )
+
+        embed.add_field(
+            name="Remaining",
+            value=f"**{remaining:.1f} hrs** before timeout" if remaining > 0 else "⚠️ Threshold exceeded",
+            inline=True
+        )
+
+        if active_session:
+            session_hours = (datetime.now(timezone.utc) - active_session.start_time).total_seconds() / 3600
+            embed.add_field(
+                name="🎮 Active Session",
+                value=f"**{session_hours:.1f} hrs** this session",
+                inline=True
+            )
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ===== Admin Commands =====
 
