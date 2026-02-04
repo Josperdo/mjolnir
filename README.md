@@ -61,6 +61,16 @@ python -m app.bot
 mjolnir
 ```
 
+### 5. Run Tests
+
+Dev dependencies (pytest) are included in the install step above. To run the test suite:
+
+```bash
+pytest tests/ -v
+```
+
+> **Note:** If you're on Python 3.9 or skipped the editable install, prefix with `PYTHONPATH=.` so the `app` package resolves: `PYTHONPATH=. pytest tests/ -v`
+
 ---
 
 ## Commands
