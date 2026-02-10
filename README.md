@@ -274,15 +274,6 @@ Database file: `mjolnir.db` (configurable via `DATABASE_PATH` in `.env`)
 
 ---
 
-## Contributing
-
-This is a work in progress! Feel free to:
-- Report bugs
-- Suggest features
-- Submit pull requests
-
----
-
 ## License
 
 MIT License - See LICENSE file for details
