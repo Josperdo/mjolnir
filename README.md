@@ -1,19 +1,21 @@
-# Mjolnir (Phase 1 - MVP)
+# Mjolnir
 **The Ban Hammer with a Stopwatch**
 
 Mjolnir is a Discord bot that tracks playtime for a target game (default: *League of Legends*) and enforces configurable limits with **automatic timeouts** instead of bans.
 
 ---
 
-## Current Features (Phase 1)
+## Current Features
 
 - **Playtime Tracking** – Records how long opted-in members play the target game
-- **Automatic Timeouts** – Users who exceed weekly limits get timed out (not banned!)
-- **Playtime Visibility** – `/mystats` shows users their weekly hours, progress bar, and remaining headroom
+- **Graduated Timeouts** – Multiple escalating thresholds (warn, short timeout, long timeout)
+- **Multiple Time Windows** – Rolling 7-day, daily, calendar week, and per-session limits
+- **Public Roast Messages** – Threshold notifications posted publicly with randomized roast messages
+- **Playtime Visibility** – `/mystats` shows multi-window progress bars, upcoming thresholds, and active session info
 - **Consent-Based** – Users must `/opt-in` before tracking starts
 - **Admin Controls** – `/hammer on|off|status` to enable/disable tracking globally
-- **SQLite Persistence** – Stores sessions and settings locally
-- **Configurable Thresholds** – Set weekly hour limits and timeout durations
+- **SQLite Persistence** – Stores sessions, rules, and settings locally
+- **Dedup Tracking** – Threshold actions only fire once per window period
 
 ---
 
@@ -76,26 +78,33 @@ pytest tests/ -v
 ## Commands
 
 ### User Commands
-- `/opt-in` - Start tracking your playtime
+- `/opt-in` - Start tracking your playtime (shows threshold rules summary)
 - `/opt-out` - Stop tracking your playtime
-- `/mystats` - View your weekly playtime, progress toward the limit, and active session info
+- `/mystats` - View playtime across all windows, progress bars, upcoming thresholds, and active session
 
 ### Admin Commands (Requires Administrator permission)
 - `/hammer on` - Enable playtime tracking globally
 - `/hammer off` - Disable playtime tracking globally
-- `/hammer status` - View current bot status and settings
+- `/hammer status` - View bot status, threshold rules, and announcement channel config
 
 ---
 
-## Default Settings
+## Default Threshold Rules
 
-Settings are stored in the database and can be modified:
+Rules are seeded on first startup and stored in the database:
 
-- **Target Game:** League of Legends
-- **Weekly Threshold:** 20 hours
-- **Timeout Duration:** 24 hours
+| Threshold | Window | Action | Duration |
+|-----------|--------|--------|----------|
+| 10 hours | Rolling 7-day | Warning | — |
+| 15 hours | Rolling 7-day | Timeout | 1 hour |
+| 20 hours | Rolling 7-day | Timeout | 6 hours |
+| 30 hours | Rolling 7-day | Timeout | 24 hours |
 
-These defaults can be changed in the database or through future admin commands (Phase 2).
+Rules can be customized via direct database edits. Admin commands for rule CRUD are planned.
+
+### Announcement Channel
+
+Set `announcement_channel_id` in the settings table to a Discord channel ID. When configured, warnings and timeouts post publicly with `@mention` + a random roast message. Falls back to DM if not configured.
 
 ---
 
@@ -104,145 +113,124 @@ These defaults can be changed in the database or through future admin commands (
 1. **Opt-in System:** Users run `/opt-in` to consent to tracking
 2. **Presence Monitoring:** Bot watches for when opted-in users play the target game
 3. **Session Tracking:** Records start/stop times automatically
-4. **Weekly Limits:** Calculates total playtime over the last 7 days
-5. **Automatic Timeouts:** When threshold is exceeded, user gets timed out
-6. **Reversible:** Timeouts expire automatically - no bans, no reinvites needed!
+4. **Multi-Window Limits:** Calculates playtime across rolling 7-day, daily, calendar week, and session windows
+5. **Graduated Enforcement:** When a threshold is crossed, the most severe new action is applied
+6. **Dedup Protection:** Each rule only fires once per window period (except session rules)
+7. **Public Shaming:** Posts roast messages in the announcement channel with @mention
+8. **Reversible:** Timeouts expire automatically - no bans, no reinvites needed!
 
 ---
 
 ## Development Roadmap
 
-### **Phase 1: Core Functionality** COMPLETE
+### Phase 1: Core Functionality — COMPLETE
 **Goal:** Get basic tracking and timeouts working
 
-**Implemented:**
-- Bot connects to Discord with proper intents (Presence + Members)
-- Tracks when opted-in users play target game via presence updates
-- Records play sessions in SQLite database (start/stop times, duration)
-- Applies timeout when user exceeds single threshold (20h/week default)
-- Admin toggle tracking on/off globally (`/hammer on|off|status`)
-- Users can opt-in/opt-out (`/opt-in`, `/opt-out`)
-- Automatic timeout enforcement (not bans - easier to manage!)
-- Basic DM notification on timeout
-- User stats command (`/mystats`) with progress bar and live session tracking
-
-**Tech Stack:**
-- Discord.py 2.x with slash commands
-- SQLite for persistence
-- Environment-based configuration (.env)
+- [x] Bot connects to Discord with proper intents (Presence + Members)
+- [x] Tracks when opted-in users play target game via presence updates
+- [x] Records play sessions in SQLite database (start/stop times, duration)
+- [x] Applies timeout when user exceeds threshold
+- [x] Admin toggle tracking on/off globally (`/hammer on|off|status`)
+- [x] Users can opt-in/opt-out (`/opt-in`, `/opt-out`)
+- [x] Automatic timeout enforcement (not bans - easier to manage!)
+- [x] Basic DM notification on timeout
+- [x] User stats command (`/mystats`) with progress bar and live session tracking
 
 ---
 
-### **Phase 2: Configuration & Multiple Thresholds** 🔄 NEXT
+### Phase 2: Configuration & Multiple Thresholds — IN PROGRESS
 **Goal:** Make the bot flexible with graduated consequences
 
-**Planned Features:**
+**Graduated Timeout System**
+- [x] Multiple configurable thresholds instead of single 20h limit
+- [x] Default rules: 10h = warning, 15h = 1h timeout, 20h = 6h timeout, 30h = 24h timeout
+- [x] Store threshold rules in database (`threshold_rules` table)
+- [x] Each threshold has: hours, action (warn/timeout), duration, window type
+- [x] Dedup tracking via `threshold_events` table
+- [x] Public roast messages posted to announcement channel with @mention
+- [x] Fallback to DM when no announcement channel configured
 
-**1. Graduated Timeout System**
-- Multiple configurable thresholds instead of single 20h limit
-- Example: 10h = warning, 15h = 1h timeout, 20h = 6h timeout, 30h = 24h timeout
-- Store threshold rules in database
-- Each threshold has: hours, action (warn/timeout), duration
+**Multiple Time Windows**
+- [x] Rolling 7-day window (existing behavior, now explicit)
+- [x] Daily limits (rolling 24h)
+- [x] Calendar week limits (Monday-Sunday)
+- [x] Session limits (per-session duration)
+- [x] `/mystats` shows progress across all active windows
 
-**2. Multiple Time Windows**
-- Daily limits: "No more than 4 hours/day"
-- Weekly limits: "No more than 20 hours/week" (current)
-- Session limits: "No single session longer than 3 hours"
-- Rolling windows: Last 7 days vs calendar week
+**Admin Configuration Commands**
+- [ ] `/hammer rules list` - View all threshold rules
+- [ ] `/hammer rules add <hours> <action> <duration> <window>` - Add a rule
+- [ ] `/hammer rules remove <id>` - Remove a rule
+- [ ] `/hammer setchannel` - Set announcement channel from Discord
+- [ ] `/settings set-game <game_name>` - Change target game
 
-**3. Admin Configuration Commands**
-- `/settings view` - See current thresholds and limits
-- `/settings set-threshold <hours> <action> <duration>` - Add/modify threshold
-- `/settings set-game <game_name>` - Change target game
-- `/settings remove-threshold <hours>` - Remove a threshold
-- Modify settings without touching database directly
+**Manual Override Commands**
+- [ ] `/pardon <user>` - Remove user's timeout early
+- [ ] `/exempt <user>` - Whitelist user from tracking (e.g., streamers)
+- [ ] `/reset-playtime <user>` - Reset user's weekly counter
+- [ ] Admin audit log for manual actions
 
-**4. Manual Override Commands**
-- `/pardon <user>` - Remove user's timeout early
-- `/exempt <user>` - Whitelist user from tracking (e.g., streamers)
-- `/reset-playtime <user>` - Reset user's weekly counter
-- Admin audit log for all manual actions
-
-**5. Grace Periods & Warnings**
-- Warning messages before hitting next threshold
-- "You've played 14h this week. At 15h, you'll get a 1h timeout."
-- Cooldown system: Reset punishment tier after good behavior
-- Configurable warning threshold (e.g., warn at 90% of limit)
-
-**Implementation Notes:**
-- Add `thresholds` table to database
-- Add `exemptions` table for whitelisted users
-- Create new admin cog file: `app/cogs/settings.py`
-- Update watcher to check multiple thresholds
-- Add warning tracking to prevent spam
+**Grace Periods & Warnings**
+- [ ] Proactive warning messages before hitting next threshold
+- [ ] "You've played 14h this week. At 15h, you'll get a 1h timeout."
+- [ ] Cooldown system: Reset punishment tier after good behavior
+- [ ] Configurable warning threshold (e.g., warn at 90% of limit)
 
 ---
 
-### **Phase 3: Cosmetic Features & Polish** FUTURE
+### Phase 3: Cosmetic Features & Polish — PLANNED
 **Goal:** Improve user experience and add fun features
 
-**Planned Features:**
+**User Stats & Dashboard**
+- [ ] `/mystats` enhancements: daily breakdown, total session count, warning status
+- [ ] `/leaderboard` - Server-wide playtime rankings (opt-in only)
+  - [ ] Most hours played
+  - [ ] Longest single session
+  - [ ] Most frequent player
 
-**1. User Stats & Dashboard**
-- `/mystats` - ✅ Basic version implemented in Phase 1 (weekly hours, progress bar, active session)
-  - *Still planned:* daily breakdown, total session count, warning status display
-- `/leaderboard` - Server-wide playtime rankings (opt-in only)
-  - Most hours played
-  - Longest single session
-  - Most frequent player
+**Enhanced Notifications**
+- [ ] Admin-customizable roast messages (move from hardcoded to DB table)
+- [ ] Weekly summary DMs
+- [ ] Timeout expiration notifications
+- [ ] Shame leaderboard / weekly recap posts in announcement channel
 
-**2. Enhanced Notifications**
-- DM warnings before hitting thresholds
-- Public milestone announcements (optional)
-  - "User X has played 10 hours this week!"
-  - Custom/randomized messages
-  - Configurable announcement channel
-- Weekly summary DMs
-- Timeout expiration notifications
+**Historical Tracking & Analytics**
+- [ ] `/history` - View your playtime over time
+- [ ] Graph generation (weekly/monthly trends)
+- [ ] Compare current week to previous weeks
+- [ ] Identify patterns (e.g., "You play most on weekends")
 
-**3. Historical Tracking & Analytics**
-- `/history` - View your playtime over time
-- Graph generation (weekly/monthly trends)
-- Compare current week to previous weeks
-- Identify patterns (e.g., "You play most on weekends")
+**Data Management**
+- [ ] `/export` - Export your data as JSON (GDPR compliance)
+- [ ] `/delete-my-data` - Remove all your tracking data
+- [ ] Privacy controls per user
 
-**4. Data Management**
-- `/export` - Export your data as JSON (GDPR compliance)
-- `/delete-my-data` - Remove all your tracking data
-- Privacy controls per user
+**Multi-Game Support**
+- [ ] Track multiple games with separate limits
+- [ ] Game groups: Limit "competitive games" combined (LoL + Valorant + CS2)
+- [ ] Per-game opt-in: Choose which games to track
+- [ ] Game-specific thresholds
 
-**5. Multi-Game Support**
-- Track multiple games with separate limits
-- Game groups: Limit "competitive games" combined (LoL + Valorant + CS2)
-- Per-game opt-in: Choose which games to track
-- Game-specific thresholds
+**Advanced Features** (Nice-to-have)
+- [ ] Integration with Riot Games API for match history
+- [ ] Productivity rewards: Reduce timeout if user joins study channels
+- [ ] Scheduled breaks: Auto-enable stricter limits during exam weeks
+- [ ] Buddy system: Users set accountability partners who get notified
 
-**6. Advanced Features** (Nice-to-have)
-- Integration with Riot Games API for match history
-- Productivity rewards: Reduce timeout if user joins study channels
-- Scheduled breaks: Auto-enable stricter limits during exam weeks
-- Buddy system: Users set accountability partners who get notified
-
-**7. Improved Logging & Error Handling**
-- Comprehensive logging system (not just print statements)
-- Error tracking and reporting
-- Admin notification on critical errors
-- Graceful degradation if Discord API is slow
-
-**Implementation Notes:**
-- Consider PostgreSQL for production (better concurrency)
-- Add graphing library (matplotlib/plotly)
-- Create visualization cog: `app/cogs/stats.py`
-- Add scheduled tasks using `@tasks.loop()` for weekly resets
-- Implement proper logging with Python's logging module
+**Infrastructure & Code Quality**
+- [ ] Comprehensive logging system (replace print statements with Python logging)
+- [ ] Error tracking and reporting
+- [ ] Admin notification on critical errors
+- [ ] Graceful degradation if Discord API is slow
+- [ ] Consider PostgreSQL for production (better concurrency)
 
 ---
 
-## Current Phase Status
+## Current Status
 
-** Phase 1 Complete** - Core tracking and timeout system working
-** Phase 2 In Planning** - Graduated timeouts and configuration
-** Phase 3 Planned** - Polish and cosmetic features
+- **Phase 1** — Complete
+- **Phase 2** — In progress (graduated timeouts + multi-window done, admin commands next)
+- **Phase 3** — Planned
 
 ---
 
@@ -265,10 +253,12 @@ These defaults can be changed in the database or through future admin commands (
 
 ## Database Schema
 
-The bot uses SQLite with three main tables:
+The bot uses SQLite with these tables:
 - `users` - Tracks user opt-in status
 - `play_sessions` - Records individual play sessions
-- `settings` - Global bot configuration
+- `settings` - Global bot configuration (includes `announcement_channel_id`)
+- `threshold_rules` - Graduated threshold rules (hours, action, duration, window type)
+- `threshold_events` - Dedup tracking for triggered thresholds
 
 Database file: `mjolnir.db` (configurable via `DATABASE_PATH` in `.env`)
 
@@ -302,23 +292,7 @@ MIT License - See LICENSE file for details
 ### Key Technical Choices
 - **Slash commands** - Modern Discord standard, better UX
 - **Presence monitoring** - Real-time tracking without polling
-- **Rolling 7-day window** - More fair than strict calendar weeks
+- **Multiple time windows** - Rolling 7-day, daily, calendar week, and session limits
+- **Graduated thresholds** - Escalating consequences instead of a single hard cutoff
+- **Public roasts** - Fun accountability via announcement channel
 - **Dataclasses** - Clean, type-safe models
-
----
-
-## Quick Reference: What's Next?
-
-1. **Current state:** Phase 1 complete - basic tracking works
-2. **Test first:** Run the bot and verify core functionality
-3. **Next implementation:** Phase 2 - Graduated timeouts
-4. **Start with:** Add `thresholds` table and multi-threshold checking logic
-5. **Then add:** Admin commands to configure thresholds
-6. **Finally add:** Warning system and grace periods
-
-**Phase 2 Priority Order:**
-1. Graduated timeout system (most important)
-2. Admin configuration commands (enables easy testing)
-3. Manual override commands (pardon/exempt)
-4. Grace periods & warnings (polish)
-5. Multiple time windows (daily/session limits)

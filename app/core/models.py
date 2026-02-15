@@ -52,3 +52,28 @@ class BotSettings:
     weekly_threshold_hours: float = 20.0
     timeout_duration_hours: int = 24
     announcement_channel_id: Optional[int] = None
+
+
+@dataclass
+class ThresholdRule:
+    """A single threshold rule defining an action at a playtime boundary."""
+    id: Optional[int] = None
+    hours: float = 0.0
+    action: str = "warn"  # 'warn' or 'timeout'
+    duration_hours: Optional[int] = None  # timeout duration; None for warn
+    message: Optional[str] = None
+    window_type: str = "rolling_7d"  # 'daily', 'weekly', 'session', 'rolling_7d'
+
+
+@dataclass
+class ThresholdEvent:
+    """Records that a threshold rule was triggered for a user."""
+    id: Optional[int] = None
+    user_id: int = 0
+    rule_id: int = 0
+    triggered_at: Optional[datetime] = None
+    window_type: str = "rolling_7d"
+
+    def __post_init__(self):
+        if self.triggered_at is None:
+            self.triggered_at = datetime.now(timezone.utc)

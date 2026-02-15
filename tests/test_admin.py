@@ -1,4 +1,4 @@
-"""Tests for the /mystats command in the Admin cog."""
+"""Tests for the Admin cog commands."""
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -6,7 +6,7 @@ import discord
 import pytest
 
 from app.cogs.admin import Admin
-from app.core.models import BotSettings, PlaySession, User
+from app.core.models import BotSettings, PlaySession, ThresholdRule, User
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -19,11 +19,20 @@ DEFAULT_SETTINGS = BotSettings(
     timeout_duration_hours=24,
 )
 
+DEFAULT_RULES = [
+    ThresholdRule(id=1, hours=10.0, action="warn", window_type="rolling_7d"),
+    ThresholdRule(id=2, hours=15.0, action="timeout", duration_hours=1, window_type="rolling_7d"),
+    ThresholdRule(id=3, hours=20.0, action="timeout", duration_hours=6, window_type="rolling_7d"),
+    ThresholdRule(id=4, hours=30.0, action="timeout", duration_hours=24, window_type="rolling_7d"),
+]
+
 
 @pytest.fixture
 def db():
     """Mock database. Each method is a MagicMock we configure per-test."""
-    return MagicMock()
+    mock = MagicMock()
+    mock.get_threshold_rules.return_value = DEFAULT_RULES
+    return mock
 
 
 @pytest.fixture
@@ -72,32 +81,29 @@ async def test_mystats_opted_out(cog, db, interaction):
 
 
 # ---------------------------------------------------------------------------
-# Tests: embed content and color zones
+# Tests: embed color zones (based on closest threshold proximity)
 # ---------------------------------------------------------------------------
 
 
 async def test_mystats_green_zone(cog, db, interaction):
-    """5 of 20 hours (25%) — well under 50%, so green. 15 hrs remaining."""
+    """3h played — 30% of first threshold (10h), so green."""
     db.get_user.return_value = User(user_id=123456789, opted_in=True)
     db.get_settings.return_value = DEFAULT_SETTINGS
-    db.get_weekly_playtime.return_value = 5.0
+    db.get_playtime_for_window.return_value = 3.0
     db.get_active_session.return_value = None
 
     await cog.mystats.callback(cog, interaction)
 
     embed = interaction.response.send_message.call_args[1]["embed"]
-
     assert embed.color == discord.Color.green()
-    assert "5.0" in embed.fields[0].value       # playtime line
-    assert "15.0 hrs" in embed.fields[1].value  # remaining
-    assert len(embed.fields) == 2               # no active-session field
+    assert "3.0" in embed.fields[0].value
 
 
 async def test_mystats_gold_zone(cog, db, interaction):
-    """12 of 20 hours (60%) — between 50% and 75%, so gold."""
+    """6h of 10h first threshold (60%) — between 50% and 75%, so gold."""
     db.get_user.return_value = User(user_id=123456789, opted_in=True)
     db.get_settings.return_value = DEFAULT_SETTINGS
-    db.get_weekly_playtime.return_value = 12.0
+    db.get_playtime_for_window.return_value = 6.0
     db.get_active_session.return_value = None
 
     await cog.mystats.callback(cog, interaction)
@@ -107,10 +113,10 @@ async def test_mystats_gold_zone(cog, db, interaction):
 
 
 async def test_mystats_orange_zone(cog, db, interaction):
-    """16 of 20 hours (80%) — between 75% and 100%, so orange."""
+    """8h of 10h first threshold (80%) — between 75% and 100%, so orange."""
     db.get_user.return_value = User(user_id=123456789, opted_in=True)
     db.get_settings.return_value = DEFAULT_SETTINGS
-    db.get_weekly_playtime.return_value = 16.0
+    db.get_playtime_for_window.return_value = 8.0
     db.get_active_session.return_value = None
 
     await cog.mystats.callback(cog, interaction)
@@ -119,31 +125,30 @@ async def test_mystats_orange_zone(cog, db, interaction):
     assert embed.color == discord.Color.orange()
 
 
-async def test_mystats_over_threshold(cog, db, interaction):
-    """22.5 of 20 hours — red, bar fully filled, threshold exceeded text."""
+async def test_mystats_red_zone_all_exceeded(cog, db, interaction):
+    """35h played — all thresholds exceeded, bar full, red."""
     db.get_user.return_value = User(user_id=123456789, opted_in=True)
     db.get_settings.return_value = DEFAULT_SETTINGS
-    db.get_weekly_playtime.return_value = 22.5
+    db.get_playtime_for_window.return_value = 35.0
     db.get_active_session.return_value = None
 
     await cog.mystats.callback(cog, interaction)
 
     embed = interaction.response.send_message.call_args[1]["embed"]
     assert embed.color == discord.Color.red()
-    assert "█" * 20 in embed.fields[0].value          # bar is 100% full
-    assert "Threshold exceeded" in embed.fields[1].value
+    assert "All thresholds exceeded" in embed.fields[0].value
 
 
 # ---------------------------------------------------------------------------
-# Tests: active session logic (the tricky part)
+# Tests: active session logic
 # ---------------------------------------------------------------------------
 
 
 async def test_mystats_active_session_adds_live_time(cog, db, interaction):
-    """6 hrs completed + 2 hrs live = ~8 hrs total. Active session field appears."""
+    """1h completed + 2h live = 3h total. Active session field appears."""
     db.get_user.return_value = User(user_id=123456789, opted_in=True)
     db.get_settings.return_value = DEFAULT_SETTINGS
-    db.get_weekly_playtime.return_value = 6.0
+    db.get_playtime_for_window.return_value = 1.0
     db.get_active_session.return_value = PlaySession(
         id=1,
         user_id=123456789,
@@ -154,31 +159,46 @@ async def test_mystats_active_session_adds_live_time(cog, db, interaction):
     await cog.mystats.callback(cog, interaction)
 
     embed = interaction.response.send_message.call_args[1]["embed"]
-
-    # 6 + 2 = 8, which is < 10 (50% of 20) → still green
+    # 1 + 2 = 3h, 30% of 10h first threshold -> green
     assert embed.color == discord.Color.green()
-    assert "8.0" in embed.fields[0].value
+    assert "3.0" in embed.fields[0].value
 
-    # Active session field is the third field
-    assert len(embed.fields) == 3
-    assert embed.fields[2].name == "🎮 Active Session"
-    assert "2.0" in embed.fields[2].value
+    # Active session field should exist
+    active_field = next((f for f in embed.fields if f.name == "Active Session"), None)
+    assert active_field is not None
+    assert "2.0" in active_field.value
 
 
-async def test_mystats_active_session_pushes_into_orange(cog, db, interaction):
-    """13 hrs completed + 2 hrs live = 15 hrs. Lands exactly on the 75% boundary → orange."""
+# ---------------------------------------------------------------------------
+# Tests: upcoming thresholds display
+# ---------------------------------------------------------------------------
+
+
+async def test_mystats_shows_upcoming_thresholds(cog, db, interaction):
+    """With 5h played, all 4 rules should be in upcoming thresholds."""
     db.get_user.return_value = User(user_id=123456789, opted_in=True)
     db.get_settings.return_value = DEFAULT_SETTINGS
-    db.get_weekly_playtime.return_value = 13.0
-    db.get_active_session.return_value = PlaySession(
-        id=2,
-        user_id=123456789,
-        game_name="League of Legends",
-        start_time=datetime.now(timezone.utc) - timedelta(hours=2),
-    )
+    db.get_playtime_for_window.return_value = 5.0
+    db.get_active_session.return_value = None
 
     await cog.mystats.callback(cog, interaction)
 
     embed = interaction.response.send_message.call_args[1]["embed"]
-    # 13 + 2 = 15, which is >= 15 (75% of 20) → orange
-    assert embed.color == discord.Color.orange()
+    upcoming_field = next((f for f in embed.fields if f.name == "Upcoming Thresholds"), None)
+    assert upcoming_field is not None
+    assert "10.0h" in upcoming_field.value
+    assert "15.0h" in upcoming_field.value
+
+
+async def test_mystats_no_upcoming_when_all_exceeded(cog, db, interaction):
+    """With 35h played, no upcoming thresholds field."""
+    db.get_user.return_value = User(user_id=123456789, opted_in=True)
+    db.get_settings.return_value = DEFAULT_SETTINGS
+    db.get_playtime_for_window.return_value = 35.0
+    db.get_active_session.return_value = None
+
+    await cog.mystats.callback(cog, interaction)
+
+    embed = interaction.response.send_message.call_args[1]["embed"]
+    upcoming_field = next((f for f in embed.fields if f.name == "Upcoming Thresholds"), None)
+    assert upcoming_field is None

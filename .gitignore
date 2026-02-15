@@ -23,5 +23,6 @@ venv/
 dist/
 build/
 
-# Claude Code local config
+# Local config
 .claude/
+Guidelines.md

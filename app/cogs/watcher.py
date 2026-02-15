@@ -7,6 +7,9 @@ from datetime import timedelta, timezone
 import discord
 from discord.ext import commands
 
+from app.core.models import PlaySession, ThresholdRule
+from app.core.rules import evaluate_rules, get_highest_action, get_roast
+
 
 class Watcher(commands.Cog):
     """Monitors user activity and enforces playtime limits."""
@@ -88,7 +91,7 @@ class Watcher(commands.Cog):
 
         # Start new session
         session = self.db.start_session(member.id, game_name)
-        print(f"▶️  {member.name} started playing {game_name} (Session ID: {session.id})")
+        print(f"Started tracking {member.name} playing {game_name} (Session ID: {session.id})")
 
     async def _handle_game_stop(self, member: discord.Member, game_name: str):
         """
@@ -109,56 +112,145 @@ class Watcher(commands.Cog):
             return
 
         duration_hours = completed_session.duration_hours
-        print(f"⏹️  {member.name} stopped playing {game_name} (Duration: {duration_hours:.2f}h)")
+        print(f"Stopped tracking {member.name} playing {game_name} (Duration: {duration_hours:.2f}h)")
 
-        # Check if user has exceeded weekly threshold
-        await self._check_threshold(member)
+        # Check if user has exceeded any thresholds
+        await self._check_threshold(member, completed_session)
 
-    async def _check_threshold(self, member: discord.Member):
+    async def _check_threshold(self, member: discord.Member,
+                               completed_session: PlaySession = None):
         """
-        Check if user has exceeded the weekly playtime threshold.
-        If so, apply a timeout.
+        Evaluate all threshold rules across all window types.
+        Applies the most severe newly-triggered action.
 
         Args:
             member: Discord member to check
+            completed_session: The session that just ended (used for session window)
         """
+        rules = self.db.get_threshold_rules()
+        if not rules:
+            return
+
+        # Group rules by window_type
+        rules_by_window: dict[str, list[ThresholdRule]] = {}
+        for rule in rules:
+            rules_by_window.setdefault(rule.window_type, []).append(rule)
+
+        # Collect all newly triggered rules across all windows
+        all_newly_triggered: list[ThresholdRule] = []
+
+        for window_type, window_rules in rules_by_window.items():
+            # Get playtime for this window
+            playtime = self.db.get_playtime_for_window(
+                member.id, window_type, session=completed_session
+            )
+
+            # Get already-triggered rule IDs for this user in this window
+            already_triggered = set()
+            for rule in window_rules:
+                if self.db.has_threshold_been_triggered(member.id, rule.id, window_type):
+                    already_triggered.add(rule.id)
+
+            # Evaluate which rules are newly triggered
+            newly_triggered = evaluate_rules(window_rules, playtime, already_triggered)
+            all_newly_triggered.extend(newly_triggered)
+
+        if not all_newly_triggered:
+            return
+
+        # Record all triggered events
+        for rule in all_newly_triggered:
+            self.db.record_threshold_event(member.id, rule.id, rule.window_type)
+
+        # Apply the most severe action
+        highest = get_highest_action(all_newly_triggered)
+        if highest is None:
+            return
+
+        if highest.action == "timeout" and highest.duration_hours:
+            await self._apply_timeout(member, highest)
+        elif highest.action == "warn":
+            await self._send_warning(member, highest)
+
+    def _get_announcement_channel(self) -> discord.TextChannel | None:
+        """Get the configured announcement channel, or None if not set."""
         settings = self.db.get_settings()
+        if not settings.announcement_channel_id:
+            return None
+        return self.bot.get_channel(settings.announcement_channel_id)
 
-        # Get weekly playtime
-        weekly_hours = self.db.get_weekly_playtime(member.id)
+    async def _apply_timeout(self, member: discord.Member, rule: ThresholdRule):
+        """Apply a timeout and post a public roast (or DM as fallback)."""
+        timeout_duration = timedelta(hours=rule.duration_hours)
+        roast = get_roast("timeout")
 
-        # Check if threshold exceeded
-        if weekly_hours > settings.weekly_threshold_hours:
-            # Calculate timeout duration
-            timeout_duration = timedelta(hours=settings.timeout_duration_hours)
+        try:
+            await member.timeout(
+                timeout_duration,
+                reason=f"Playtime threshold exceeded ({rule.hours}h {rule.window_type})"
+            )
+            print(f"Timed out {member.name} for {rule.duration_hours}h "
+                  f"(rule: {rule.hours}h {rule.window_type})")
+        except discord.Forbidden:
+            print(f"Failed to timeout {member.name} (missing permissions)")
+            return
+        except discord.HTTPException as e:
+            print(f"Failed to timeout {member.name}: {e}")
+            return
 
+        # Build the embed
+        embed = discord.Embed(
+            title="Timeout Notice",
+            color=discord.Color.red(),
+        )
+        embed.add_field(name="Threshold", value=f"{rule.hours}h ({rule.window_type})", inline=True)
+        embed.add_field(name="Timeout Duration", value=f"{rule.duration_hours}h", inline=True)
+
+        # Post publicly or fall back to DM
+        channel = self._get_announcement_channel()
+        if channel:
             try:
-                # Apply timeout
-                await member.timeout(
-                    timeout_duration,
-                    reason=f"Exceeded weekly playtime limit ({weekly_hours:.1f}h / {settings.weekly_threshold_hours}h)"
+                await channel.send(
+                    f"{member.mention} {roast}",
+                    embed=embed,
                 )
+                return
+            except (discord.Forbidden, discord.HTTPException):
+                pass  # Fall through to DM
 
-                print(f"🔨 {member.name} timed out for {settings.timeout_duration_hours}h "
-                      f"(played {weekly_hours:.1f}h this week)")
+        # Fallback: DM
+        try:
+            await member.send(f"{roast}", embed=embed)
+        except discord.Forbidden:
+            print(f"Could not DM {member.name}")
 
-                # Try to send a DM to the user
-                try:
-                    await member.send(
-                        f"⚠️ You've been timed out for **{settings.timeout_duration_hours} hours**.\n\n"
-                        f"**Reason:** You've played {settings.target_game} for "
-                        f"**{weekly_hours:.1f} hours** this week, exceeding the "
-                        f"**{settings.weekly_threshold_hours}h** limit.\n\n"
-                        f"Take a break and we'll see you when the timeout expires!"
-                    )
-                except discord.Forbidden:
-                    # User has DMs disabled
-                    print(f"   ⚠️  Could not DM {member.name} (DMs disabled)")
+    async def _send_warning(self, member: discord.Member, rule: ThresholdRule):
+        """Post a public warning roast (or DM as fallback)."""
+        roast = get_roast("warn")
 
-            except discord.Forbidden:
-                print(f"   ❌ Failed to timeout {member.name} (missing permissions)")
-            except discord.HTTPException as e:
-                print(f"   ❌ Failed to timeout {member.name}: {e}")
+        embed = discord.Embed(
+            title="Playtime Warning",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(name="Threshold", value=f"{rule.hours}h ({rule.window_type})", inline=True)
+
+        # Post publicly or fall back to DM
+        channel = self._get_announcement_channel()
+        if channel:
+            try:
+                await channel.send(
+                    f"{member.mention} {roast}",
+                    embed=embed,
+                )
+                return
+            except (discord.Forbidden, discord.HTTPException):
+                pass  # Fall through to DM
+
+        # Fallback: DM
+        try:
+            await member.send(f"{roast}", embed=embed)
+        except discord.Forbidden:
+            print(f"Could not DM {member.name}")
 
 
 async def setup(bot):

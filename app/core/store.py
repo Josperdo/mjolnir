@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from .models import BotSettings, PlaySession, User
+from .models import BotSettings, PlaySession, ThresholdEvent, ThresholdRule, User
 
 
 class Database:
@@ -67,10 +67,56 @@ class Database:
             ON play_sessions(user_id, start_time)
         """)
 
+        # Threshold rules table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS threshold_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hours REAL NOT NULL,
+                action TEXT NOT NULL DEFAULT 'warn',
+                duration_hours INTEGER,
+                message TEXT,
+                window_type TEXT NOT NULL DEFAULT 'rolling_7d'
+            )
+        """)
+
+        # Threshold events table (dedup tracking)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS threshold_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                rule_id INTEGER NOT NULL,
+                triggered_at TIMESTAMP NOT NULL,
+                window_type TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users (user_id),
+                FOREIGN KEY (rule_id) REFERENCES threshold_rules (id)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_threshold_events_user_rule
+            ON threshold_events(user_id, rule_id, triggered_at)
+        """)
+
         # Insert default settings if not exists
         cursor.execute("""
             INSERT OR IGNORE INTO settings (id) VALUES (1)
         """)
+
+        # Seed default threshold rules if table is empty
+        cursor.execute("SELECT COUNT(*) as cnt FROM threshold_rules")
+        if cursor.fetchone()["cnt"] == 0:
+            default_rules = [
+                (10.0, 'warn', None, None, 'rolling_7d'),
+                (15.0, 'timeout', 1, None, 'rolling_7d'),
+                (20.0, 'timeout', 6, None, 'rolling_7d'),
+                (30.0, 'timeout', 24, None, 'rolling_7d'),
+            ]
+            cursor.executemany(
+                """INSERT INTO threshold_rules
+                   (hours, action, duration_hours, message, window_type)
+                   VALUES (?, ?, ?, ?, ?)""",
+                default_rules
+            )
 
         self.conn.commit()
 
@@ -212,6 +258,121 @@ class Database:
         result = cursor.fetchone()
         total_seconds = result["total"] if result["total"] else 0
         return total_seconds / 3600  # Convert to hours
+
+    # ===== Threshold rule operations =====
+
+    def get_threshold_rules(self, window_type: Optional[str] = None) -> List[ThresholdRule]:
+        """Get threshold rules, optionally filtered by window type, ordered by hours ASC."""
+        cursor = self.conn.cursor()
+
+        if window_type:
+            cursor.execute(
+                "SELECT * FROM threshold_rules WHERE window_type = ? ORDER BY hours ASC",
+                (window_type,)
+            )
+        else:
+            cursor.execute("SELECT * FROM threshold_rules ORDER BY hours ASC")
+
+        return [
+            ThresholdRule(
+                id=row["id"],
+                hours=row["hours"],
+                action=row["action"],
+                duration_hours=row["duration_hours"],
+                message=row["message"],
+                window_type=row["window_type"],
+            )
+            for row in cursor.fetchall()
+        ]
+
+    def get_daily_playtime(self, user_id: int) -> float:
+        """Get total playtime in hours for the past 24 hours."""
+        cursor = self.conn.cursor()
+        day_ago = datetime.now(timezone.utc) - timedelta(hours=24)
+
+        cursor.execute(
+            """SELECT SUM(duration_seconds) as total
+               FROM play_sessions
+               WHERE user_id = ? AND start_time >= ? AND end_time IS NOT NULL""",
+            (user_id, day_ago)
+        )
+
+        result = cursor.fetchone()
+        total_seconds = result["total"] if result["total"] else 0
+        return total_seconds / 3600
+
+    def get_calendar_week_playtime(self, user_id: int) -> float:
+        """Get total playtime in hours since Monday 00:00 UTC of the current week."""
+        cursor = self.conn.cursor()
+        now = datetime.now(timezone.utc)
+        # Monday = 0 in weekday()
+        monday = now - timedelta(days=now.weekday(), hours=now.hour,
+                                 minutes=now.minute, seconds=now.second,
+                                 microseconds=now.microsecond)
+
+        cursor.execute(
+            """SELECT SUM(duration_seconds) as total
+               FROM play_sessions
+               WHERE user_id = ? AND start_time >= ? AND end_time IS NOT NULL""",
+            (user_id, monday)
+        )
+
+        result = cursor.fetchone()
+        total_seconds = result["total"] if result["total"] else 0
+        return total_seconds / 3600
+
+    def get_playtime_for_window(self, user_id: int, window_type: str,
+                                session: Optional[PlaySession] = None) -> float:
+        """Get playtime for a specific window type."""
+        if window_type == "rolling_7d":
+            return self.get_weekly_playtime(user_id)
+        elif window_type == "daily":
+            return self.get_daily_playtime(user_id)
+        elif window_type == "weekly":
+            return self.get_calendar_week_playtime(user_id)
+        elif window_type == "session":
+            return session.duration_hours if session else 0.0
+        return 0.0
+
+    def has_threshold_been_triggered(self, user_id: int, rule_id: int,
+                                     window_type: str) -> bool:
+        """Check if a threshold event exists for this user+rule within the current window."""
+        # Session rules fire every qualifying session
+        if window_type == "session":
+            return False
+
+        cursor = self.conn.cursor()
+        now = datetime.now(timezone.utc)
+
+        if window_type == "rolling_7d":
+            window_start = now - timedelta(days=7)
+        elif window_type == "daily":
+            window_start = now - timedelta(hours=24)
+        elif window_type == "weekly":
+            window_start = now - timedelta(days=now.weekday(), hours=now.hour,
+                                           minutes=now.minute, seconds=now.second,
+                                           microseconds=now.microsecond)
+        else:
+            return False
+
+        cursor.execute(
+            """SELECT COUNT(*) as cnt FROM threshold_events
+               WHERE user_id = ? AND rule_id = ? AND triggered_at >= ?""",
+            (user_id, rule_id, window_start)
+        )
+
+        return cursor.fetchone()["cnt"] > 0
+
+    def record_threshold_event(self, user_id: int, rule_id: int,
+                               window_type: str) -> None:
+        """Record that a threshold rule was triggered for a user."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """INSERT INTO threshold_events (user_id, rule_id, triggered_at, window_type)
+               VALUES (?, ?, ?, ?)""",
+            (user_id, rule_id, datetime.now(timezone.utc), window_type)
+        )
+        self.conn.commit()
 
     # ===== Settings operations =====
 
