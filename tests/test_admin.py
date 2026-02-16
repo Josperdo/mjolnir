@@ -6,7 +6,7 @@ import discord
 import pytest
 
 from app.cogs.admin import Admin
-from app.core.models import BotSettings, PlaySession, ThresholdRule, User
+from app.core.models import AuditLog, BotSettings, PlaySession, ThresholdRule, User
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -426,3 +426,139 @@ async def test_rules_remove_not_found(cog, db, interaction):
 
     msg = interaction.response.send_message.call_args[0][0]
     assert "no rule found" in msg.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests: /hammer pardon
+# ---------------------------------------------------------------------------
+
+
+async def test_pardon_removes_timeout(cog, db, interaction):
+    """Pardoning a user calls timeout(None) and logs the action."""
+    target = MagicMock(spec=discord.Member)
+    target.id = 987654321
+    target.name = "TargetUser"
+    target.mention = "<@987654321>"
+    target.timeout = AsyncMock()
+
+    await cog.hammer_pardon.callback(cog, interaction, target)
+
+    target.timeout.assert_called_once()
+    assert target.timeout.call_args[0][0] is None
+    db.add_audit_log.assert_called_once()
+    log_call = db.add_audit_log.call_args
+    assert log_call[1]["action_type"] == "pardon"
+    assert log_call[1]["target_user_id"] == 987654321
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "pardoned" in msg.lower()
+
+
+async def test_pardon_forbidden(cog, db, interaction):
+    """Pardon fails gracefully when bot lacks permissions."""
+    target = MagicMock(spec=discord.Member)
+    target.id = 987654321
+    target.mention = "<@987654321>"
+    target.timeout = AsyncMock(side_effect=discord.Forbidden(MagicMock(), "No perms"))
+
+    await cog.hammer_pardon.callback(cog, interaction, target)
+
+    db.add_audit_log.assert_not_called()
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "missing permissions" in msg.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests: /hammer exempt
+# ---------------------------------------------------------------------------
+
+
+async def test_exempt_toggles_on(cog, db, interaction):
+    """Exempting a non-exempt user sets exempt to True."""
+    target = MagicMock(spec=discord.Member)
+    target.id = 987654321
+    target.name = "TargetUser"
+    target.mention = "<@987654321>"
+    db.get_user.return_value = User(user_id=987654321, opted_in=True, exempt=False)
+
+    await cog.hammer_exempt.callback(cog, interaction, target)
+
+    db.set_user_exempt.assert_called_once_with(987654321, True)
+    db.add_audit_log.assert_called_once()
+    assert db.add_audit_log.call_args[1]["action_type"] == "exempt"
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "exempt" in msg.lower()
+
+
+async def test_exempt_toggles_off(cog, db, interaction):
+    """Exempting an already-exempt user removes exemption."""
+    target = MagicMock(spec=discord.Member)
+    target.id = 987654321
+    target.name = "TargetUser"
+    target.mention = "<@987654321>"
+    db.get_user.return_value = User(user_id=987654321, opted_in=True, exempt=True)
+
+    await cog.hammer_exempt.callback(cog, interaction, target)
+
+    db.set_user_exempt.assert_called_once_with(987654321, False)
+    assert db.add_audit_log.call_args[1]["action_type"] == "unexempt"
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "no longer exempt" in msg.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests: /hammer resetplaytime
+# ---------------------------------------------------------------------------
+
+
+async def test_resetplaytime_clears_data(cog, db, interaction):
+    """Resetting playtime deletes sessions and events."""
+    target = MagicMock(spec=discord.Member)
+    target.id = 987654321
+    target.name = "TargetUser"
+    target.mention = "<@987654321>"
+    db.delete_user_sessions.return_value = 5
+    db.clear_threshold_events.return_value = 2
+
+    await cog.hammer_resetplaytime.callback(cog, interaction, target)
+
+    db.delete_user_sessions.assert_called_once_with(987654321)
+    db.clear_threshold_events.assert_called_once_with(987654321)
+    db.add_audit_log.assert_called_once()
+    assert db.add_audit_log.call_args[1]["action_type"] == "reset_playtime"
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "5" in msg
+    assert "2" in msg
+
+
+# ---------------------------------------------------------------------------
+# Tests: /hammer audit
+# ---------------------------------------------------------------------------
+
+
+async def test_audit_shows_entries(cog, db, interaction):
+    """Audit command shows log entries in an embed."""
+    from datetime import datetime, timezone
+    db.get_audit_log.return_value = [
+        AuditLog(
+            id=1, admin_id=111, action_type="pardon",
+            target_user_id=222, details="Timeout removed",
+            created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        ),
+    ]
+
+    await cog.hammer_audit.callback(cog, interaction)
+
+    embed = interaction.response.send_message.call_args[1]["embed"]
+    assert embed.title == "Admin Audit Log"
+    assert len(embed.fields) == 1
+    assert "pardon" in embed.fields[0].name.lower()
+
+
+async def test_audit_empty(cog, db, interaction):
+    """Audit command with no entries shows a message."""
+    db.get_audit_log.return_value = []
+
+    await cog.hammer_audit.callback(cog, interaction)
+
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "no audit log" in msg.lower()

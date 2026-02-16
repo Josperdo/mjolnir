@@ -2,7 +2,7 @@
 Watcher cog for Mjolnir.
 Monitors user presence and tracks playtime for the target game.
 """
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import discord
 from discord.ext import commands
@@ -35,9 +35,12 @@ class Watcher(commands.Cog):
         if not settings.tracking_enabled:
             return
 
-        # Check if user is opted in
+        # Check if user is opted in and not exempt
         user = self.db.get_user(after.id)
         if not user or not user.opted_in:
+            return
+
+        if user.exempt:
             return
 
         # Get game activity before and after
@@ -121,15 +124,20 @@ class Watcher(commands.Cog):
                                completed_session: PlaySession = None):
         """
         Evaluate all threshold rules across all window types.
-        Applies the most severe newly-triggered action.
+        Applies the most severe newly-triggered action, then checks
+        for proactive approaching-threshold warnings.
 
         Args:
             member: Discord member to check
             completed_session: The session that just ended (used for session window)
         """
+        settings = self.db.get_settings()
         rules = self.db.get_threshold_rules()
         if not rules:
             return
+
+        # Cooldown: if user has been clean for cooldown_days, reset events
+        self._apply_cooldown(member.id, settings.cooldown_days)
 
         # Group rules by window_type
         rules_by_window: dict[str, list[ThresholdRule]] = {}
@@ -155,22 +163,76 @@ class Watcher(commands.Cog):
             newly_triggered = evaluate_rules(window_rules, playtime, already_triggered)
             all_newly_triggered.extend(newly_triggered)
 
-        if not all_newly_triggered:
+        if all_newly_triggered:
+            # Record all triggered events
+            for rule in all_newly_triggered:
+                self.db.record_threshold_event(member.id, rule.id, rule.window_type)
+
+            # Apply the most severe action
+            highest = get_highest_action(all_newly_triggered)
+            if highest is not None:
+                if highest.action == "timeout" and highest.duration_hours:
+                    await self._apply_timeout(member, highest)
+                elif highest.action == "warn":
+                    await self._send_warning(member, highest)
+            return  # Skip proactive warnings if a threshold was actually crossed
+
+        # Proactive warnings for approaching thresholds
+        await self._check_proactive_warnings(
+            member, rules_by_window, completed_session, settings
+        )
+
+    def _apply_cooldown(self, user_id: int, cooldown_days: int):
+        """Clear threshold events if user has been clean for cooldown_days."""
+        if cooldown_days <= 0:
+            return
+        last_event_time = self.db.get_last_threshold_event_time(user_id)
+        if last_event_time is None:
+            return
+        cutoff = datetime.now(timezone.utc) - timedelta(days=cooldown_days)
+        if last_event_time < cutoff:
+            cleared = self.db.clear_threshold_events(user_id)
+            if cleared:
+                print(f"Cooldown: cleared {cleared} threshold events for user {user_id}")
+
+    async def _check_proactive_warnings(
+        self,
+        member: discord.Member,
+        rules_by_window: dict[str, list[ThresholdRule]],
+        completed_session: PlaySession,
+        settings,
+    ):
+        """Send a DM when the user is approaching the next unfired threshold."""
+        pct = settings.warning_threshold_pct
+        if pct <= 0:
             return
 
-        # Record all triggered events
-        for rule in all_newly_triggered:
-            self.db.record_threshold_event(member.id, rule.id, rule.window_type)
+        for window_type, window_rules in rules_by_window.items():
+            playtime = self.db.get_playtime_for_window(
+                member.id, window_type, session=completed_session
+            )
 
-        # Apply the most severe action
-        highest = get_highest_action(all_newly_triggered)
-        if highest is None:
-            return
+            # Find the next rule the user hasn't exceeded yet
+            for rule in window_rules:
+                if playtime >= rule.hours:
+                    continue  # Already exceeded
 
-        if highest.action == "timeout" and highest.duration_hours:
-            await self._apply_timeout(member, highest)
-        elif highest.action == "warn":
-            await self._send_warning(member, highest)
+                # Check if approaching (at or above pct of threshold)
+                if playtime < rule.hours * pct:
+                    break  # Not close enough, and rules are sorted ascending
+
+                # Check dedup
+                if self.db.has_proactive_warning_been_sent(
+                    member.id, rule.id, window_type
+                ):
+                    break  # Already warned for this rule in this window
+
+                # Send the proactive warning
+                await self._send_proactive_warning(member, rule, playtime)
+                self.db.record_proactive_warning(
+                    member.id, rule.id, window_type
+                )
+                break  # Only warn about the closest upcoming rule
 
     def _get_announcement_channel(self) -> discord.TextChannel | None:
         """Get the configured announcement channel, or None if not set."""
@@ -251,6 +313,36 @@ class Watcher(commands.Cog):
             await member.send(f"{roast}", embed=embed)
         except discord.Forbidden:
             print(f"Could not DM {member.name}")
+
+
+    async def _send_proactive_warning(self, member: discord.Member,
+                                      rule: ThresholdRule, playtime: float):
+        """DM user that they are approaching a threshold."""
+        remaining = rule.hours - playtime
+        if rule.action == "timeout":
+            action_text = f"a **{rule.duration_hours}h** timeout"
+        else:
+            action_text = "a warning"
+
+        window_label = {
+            "rolling_7d": "this week",
+            "daily": "today",
+            "weekly": "this calendar week",
+            "session": "this session",
+        }.get(rule.window_type, rule.window_type)
+
+        message = (
+            f"You've played **{playtime:.1f}h** {window_label}. "
+            f"At **{rule.hours}h**, you'll get {action_text}. "
+            f"(**{remaining:.1f}h** remaining)"
+        )
+
+        try:
+            await member.send(message)
+            print(f"Proactive warning sent to {member.name}: "
+                  f"{playtime:.1f}h / {rule.hours}h {rule.window_type}")
+        except discord.Forbidden:
+            print(f"Could not DM proactive warning to {member.name}")
 
 
 async def setup(bot):

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from .models import BotSettings, PlaySession, ThresholdEvent, ThresholdRule, User
+from .models import AuditLog, BotSettings, PlaySession, ThresholdEvent, ThresholdRule, User
 
 
 class Database:
@@ -102,6 +102,36 @@ class Database:
             INSERT OR IGNORE INTO settings (id) VALUES (1)
         """)
 
+        # Audit log table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_id INTEGER NOT NULL,
+                action_type TEXT NOT NULL,
+                target_user_id INTEGER,
+                details TEXT,
+                created_at TIMESTAMP NOT NULL
+            )
+        """)
+
+        # Proactive warning dedup table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS proactive_warnings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                rule_id INTEGER NOT NULL,
+                warned_at TIMESTAMP NOT NULL,
+                window_type TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users (user_id),
+                FOREIGN KEY (rule_id) REFERENCES threshold_rules (id)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_proactive_warnings_user_rule
+            ON proactive_warnings(user_id, rule_id, warned_at)
+        """)
+
         # Seed default threshold rules if table is empty
         cursor.execute("SELECT COUNT(*) as cnt FROM threshold_rules")
         if cursor.fetchone()["cnt"] == 0:
@@ -120,6 +150,25 @@ class Database:
 
         self.conn.commit()
 
+        # Schema migrations for new columns on existing tables
+        self._migrate(cursor)
+        self.conn.commit()
+
+    def _migrate(self, cursor):
+        """Add columns that may not exist in older databases."""
+        migrations = [
+            ("users", "exempt", "INTEGER NOT NULL DEFAULT 0"),
+            ("settings", "warning_threshold_pct", "REAL NOT NULL DEFAULT 0.9"),
+            ("settings", "cooldown_days", "INTEGER NOT NULL DEFAULT 3"),
+        ]
+        for table, column, col_type in migrations:
+            try:
+                cursor.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"
+                )
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
     # ===== User operations =====
 
     def get_user(self, user_id: int) -> Optional[User]:
@@ -132,6 +181,7 @@ class Database:
             return User(
                 user_id=row["user_id"],
                 opted_in=bool(row["opted_in"]),
+                exempt=bool(row["exempt"]),
                 created_at=row["created_at"]
             )
         return None
@@ -167,6 +217,36 @@ class Database:
         cursor = self.conn.cursor()
         cursor.execute("SELECT user_id FROM users WHERE opted_in = 1")
         return [row["user_id"] for row in cursor.fetchall()]
+
+    def set_user_exempt(self, user_id: int, exempt: bool):
+        """Set user's exempt status. Creates user if doesn't exist."""
+        user = self.get_user(user_id)
+        if user is None:
+            self.create_user(user_id, opted_in=False)
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "UPDATE users SET exempt = ? WHERE user_id = ?",
+            (int(exempt), user_id)
+        )
+        self.conn.commit()
+
+    def delete_user_sessions(self, user_id: int) -> int:
+        """Delete all play sessions for a user. Returns count of deleted rows."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM play_sessions WHERE user_id = ?", (user_id,)
+        )
+        self.conn.commit()
+        return cursor.rowcount
+
+    def clear_threshold_events(self, user_id: int) -> int:
+        """Delete all threshold events for a user. Returns count of deleted rows."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM threshold_events WHERE user_id = ?", (user_id,)
+        )
+        self.conn.commit()
+        return cursor.rowcount
 
     # ===== Play session operations =====
 
@@ -434,14 +514,17 @@ class Database:
             target_game=row["target_game"],
             weekly_threshold_hours=row["weekly_threshold_hours"],
             timeout_duration_hours=row["timeout_duration_hours"],
-            announcement_channel_id=row["announcement_channel_id"]
+            announcement_channel_id=row["announcement_channel_id"],
+            warning_threshold_pct=row["warning_threshold_pct"],
+            cooldown_days=row["cooldown_days"],
         )
 
     def update_settings(self, **kwargs):
         """Update bot settings. Pass settings as keyword arguments."""
         allowed_fields = {
             "tracking_enabled", "target_game", "weekly_threshold_hours",
-            "timeout_duration_hours", "announcement_channel_id"
+            "timeout_duration_hours", "announcement_channel_id",
+            "warning_threshold_pct", "cooldown_days",
         }
 
         updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
@@ -458,6 +541,99 @@ class Database:
         cursor = self.conn.cursor()
         cursor.execute(f"UPDATE settings SET {set_clause} WHERE id = 1", values)
         self.conn.commit()
+
+    # ===== Audit log operations =====
+
+    def add_audit_log(self, admin_id: int, action_type: str,
+                      target_user_id: int, details: Optional[str] = None) -> AuditLog:
+        """Record an admin action in the audit log."""
+        cursor = self.conn.cursor()
+        created_at = datetime.now(timezone.utc)
+        cursor.execute(
+            """INSERT INTO audit_log
+               (admin_id, action_type, target_user_id, details, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (admin_id, action_type, target_user_id, details, created_at)
+        )
+        self.conn.commit()
+        return AuditLog(
+            id=cursor.lastrowid,
+            admin_id=admin_id,
+            action_type=action_type,
+            target_user_id=target_user_id,
+            details=details,
+            created_at=created_at,
+        )
+
+    def get_audit_log(self, limit: int = 10) -> List[AuditLog]:
+        """Get the most recent audit log entries."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM audit_log ORDER BY created_at DESC LIMIT ?",
+            (limit,)
+        )
+        return [
+            AuditLog(
+                id=row["id"],
+                admin_id=row["admin_id"],
+                action_type=row["action_type"],
+                target_user_id=row["target_user_id"],
+                details=row["details"],
+                created_at=row["created_at"],
+            )
+            for row in cursor.fetchall()
+        ]
+
+    # ===== Proactive warning operations =====
+
+    def has_proactive_warning_been_sent(self, user_id: int, rule_id: int,
+                                         window_type: str) -> bool:
+        """Check if a proactive warning was already sent for this user+rule in the window."""
+        if window_type == "session":
+            return False
+
+        cursor = self.conn.cursor()
+        now = datetime.now(timezone.utc)
+
+        if window_type == "rolling_7d":
+            window_start = now - timedelta(days=7)
+        elif window_type == "daily":
+            window_start = now - timedelta(hours=24)
+        elif window_type == "weekly":
+            window_start = now - timedelta(days=now.weekday(), hours=now.hour,
+                                           minutes=now.minute, seconds=now.second,
+                                           microseconds=now.microsecond)
+        else:
+            return False
+
+        cursor.execute(
+            """SELECT COUNT(*) as cnt FROM proactive_warnings
+               WHERE user_id = ? AND rule_id = ? AND warned_at >= ?""",
+            (user_id, rule_id, window_start)
+        )
+        return cursor.fetchone()["cnt"] > 0
+
+    def record_proactive_warning(self, user_id: int, rule_id: int,
+                                  window_type: str) -> None:
+        """Record that a proactive warning was sent."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """INSERT INTO proactive_warnings (user_id, rule_id, warned_at, window_type)
+               VALUES (?, ?, ?, ?)""",
+            (user_id, rule_id, datetime.now(timezone.utc), window_type)
+        )
+        self.conn.commit()
+
+    def get_last_threshold_event_time(self, user_id: int) -> Optional[datetime]:
+        """Get the timestamp of the user's most recent threshold event."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """SELECT MAX(triggered_at) as latest FROM threshold_events
+               WHERE user_id = ?""",
+            (user_id,)
+        )
+        row = cursor.fetchone()
+        return row["latest"] if row and row["latest"] else None
 
     def close(self):
         """Close database connection."""

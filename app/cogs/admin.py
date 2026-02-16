@@ -503,6 +503,145 @@ class Admin(commands.Cog):
             )
 
 
+    # ===== Manual Override Commands =====
+
+    # ----- /hammer pardon -----
+
+    @hammer.command(name="pardon", description="Remove a user's timeout early")
+    @app_commands.describe(user="The user to pardon")
+    async def hammer_pardon(
+        self, interaction: discord.Interaction, user: discord.Member
+    ):
+        """Remove a user's active timeout."""
+        try:
+            await user.timeout(None, reason=f"Pardoned by {interaction.user.name}")
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                f"Cannot pardon {user.mention} — missing permissions.",
+                ephemeral=True
+            )
+            return
+        except discord.HTTPException as e:
+            await interaction.response.send_message(
+                f"Failed to pardon {user.mention}: {e}",
+                ephemeral=True
+            )
+            return
+
+        self.db.add_audit_log(
+            admin_id=interaction.user.id,
+            action_type="pardon",
+            target_user_id=user.id,
+            details=f"Timeout removed by {interaction.user.name}",
+        )
+
+        await interaction.response.send_message(
+            f"{user.mention} has been pardoned. Their timeout has been removed.",
+            ephemeral=True
+        )
+        print(f"{user.name} pardoned by {interaction.user.name}")
+
+    # ----- /hammer exempt -----
+
+    @hammer.command(
+        name="exempt",
+        description="Toggle a user's exemption from tracking"
+    )
+    @app_commands.describe(user="The user to exempt or un-exempt")
+    async def hammer_exempt(
+        self, interaction: discord.Interaction, user: discord.Member
+    ):
+        """Toggle exemption status for a user."""
+        db_user = self.db.get_user(user.id)
+        currently_exempt = db_user.exempt if db_user else False
+        new_status = not currently_exempt
+
+        self.db.set_user_exempt(user.id, new_status)
+
+        action = "exempt" if new_status else "unexempt"
+        self.db.add_audit_log(
+            admin_id=interaction.user.id,
+            action_type=action,
+            target_user_id=user.id,
+        )
+
+        if new_status:
+            await interaction.response.send_message(
+                f"{user.mention} is now **exempt** from tracking.",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"{user.mention} is no longer exempt from tracking.",
+                ephemeral=True
+            )
+        print(f"{user.name} {action}ed by {interaction.user.name}")
+
+    # ----- /hammer resetplaytime -----
+
+    @hammer.command(
+        name="resetplaytime",
+        description="Reset a user's playtime history and threshold events"
+    )
+    @app_commands.describe(user="The user whose playtime to reset")
+    async def hammer_resetplaytime(
+        self, interaction: discord.Interaction, user: discord.Member
+    ):
+        """Reset all play sessions and threshold events for a user."""
+        sessions_deleted = self.db.delete_user_sessions(user.id)
+        events_cleared = self.db.clear_threshold_events(user.id)
+
+        self.db.add_audit_log(
+            admin_id=interaction.user.id,
+            action_type="reset_playtime",
+            target_user_id=user.id,
+            details=f"Deleted {sessions_deleted} sessions, {events_cleared} events",
+        )
+
+        await interaction.response.send_message(
+            f"Reset playtime for {user.mention}.\n"
+            f"Removed **{sessions_deleted}** sessions and "
+            f"**{events_cleared}** threshold events.",
+            ephemeral=True
+        )
+        print(f"Playtime reset for {user.name} by {interaction.user.name}")
+
+    # ----- /hammer audit -----
+
+    @hammer.command(name="audit", description="View recent admin actions")
+    @app_commands.describe(count="Number of entries to show (default 10)")
+    async def hammer_audit(
+        self, interaction: discord.Interaction, count: Optional[int] = 10
+    ):
+        """Display recent audit log entries."""
+        entries = self.db.get_audit_log(limit=min(count, 25))
+
+        if not entries:
+            await interaction.response.send_message(
+                "No audit log entries yet.", ephemeral=True
+            )
+            return
+
+        embed = discord.Embed(title="Admin Audit Log", color=discord.Color.dark_grey())
+
+        for entry in entries:
+            timestamp = entry.created_at.strftime("%Y-%m-%d %H:%M UTC")
+            value = (
+                f"Admin: <@{entry.admin_id}>\n"
+                f"Target: <@{entry.target_user_id}>\n"
+                f"Time: {timestamp}"
+            )
+            if entry.details:
+                value += f"\n{entry.details}"
+            embed.add_field(
+                name=entry.action_type.replace("_", " ").title(),
+                value=value,
+                inline=False,
+            )
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 async def setup(bot):
     """Load the Admin cog."""
     await bot.add_cog(Admin(bot))

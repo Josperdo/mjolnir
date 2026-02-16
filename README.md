@@ -165,16 +165,16 @@ Set `announcement_channel_id` in the settings table to a Discord channel ID. Whe
 - [x] `/hammer setgame <game_name>` - Change target game
 
 **Manual Override Commands**
-- [ ] `/pardon <user>` - Remove user's timeout early
-- [ ] `/exempt <user>` - Whitelist user from tracking (e.g., streamers)
-- [ ] `/reset-playtime <user>` - Reset user's weekly counter
-- [ ] Admin audit log for manual actions
+- [x] `/hammer pardon <user>` - Remove user's timeout early
+- [x] `/hammer exempt <user>` - Toggle exemption from tracking (e.g., streamers)
+- [x] `/hammer resetplaytime <user>` - Reset user's playtime history and threshold events
+- [x] `/hammer audit` - View admin audit log for manual actions
 
 **Grace Periods & Warnings**
-- [ ] Proactive warning messages before hitting next threshold
-- [ ] "You've played 14h this week. At 15h, you'll get a 1h timeout."
-- [ ] Cooldown system: Reset punishment tier after good behavior
-- [ ] Configurable warning threshold (e.g., warn at 90% of limit)
+- [x] Proactive warning messages before hitting next threshold
+- [x] "You've played 14h this week. At 15h, you'll get a 1h timeout."
+- [x] Cooldown system: Reset punishment tier after good behavior (configurable `cooldown_days`)
+- [x] Configurable warning threshold (e.g., warn at 90% of limit via `warning_threshold_pct`)
 
 ---
 

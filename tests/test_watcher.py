@@ -1,12 +1,12 @@
 """Tests for the Watcher cog's threshold checking logic."""
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import pytest
 
 from app.cogs.watcher import Watcher
-from app.core.models import BotSettings, PlaySession, ThresholdRule
+from app.core.models import BotSettings, PlaySession, ThresholdRule, User
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -50,6 +50,8 @@ def db():
     mock.get_threshold_rules.return_value = DEFAULT_RULES
     mock.get_settings.return_value = DEFAULT_SETTINGS
     mock.has_threshold_been_triggered.return_value = False
+    mock.get_last_threshold_event_time.return_value = None
+    mock.has_proactive_warning_been_sent.return_value = False
     return mock
 
 
@@ -254,3 +256,118 @@ async def test_check_threshold_multi_window(mock_roast, cog, db, member):
     # Warn, not timeout
     member.timeout.assert_not_called()
     member.send.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Tests: exempt users
+# ---------------------------------------------------------------------------
+
+
+async def test_exempt_user_skipped(cog, db):
+    """Exempt user's presence updates are ignored."""
+    db.get_user.return_value = User(user_id=123, opted_in=True, exempt=True)
+
+    before = MagicMock(spec=discord.Member)
+    before.id = 123
+    before.activities = []
+
+    after = MagicMock(spec=discord.Member)
+    after.id = 123
+    game = MagicMock(spec=discord.Game)
+    game.type = discord.ActivityType.playing
+    game.name = "League of Legends"
+    after.activities = [game]
+
+    await cog.on_presence_update(before, after)
+
+    db.start_session.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tests: cooldown system
+# ---------------------------------------------------------------------------
+
+
+async def test_cooldown_clears_old_events(cog, db, member):
+    """Events older than cooldown_days get cleared before evaluation."""
+    # Last event was 5 days ago, cooldown is 3 days -> should clear
+    db.get_last_threshold_event_time.return_value = (
+        datetime.now(timezone.utc) - timedelta(days=5)
+    )
+    db.get_playtime_for_window.return_value = 5.0  # Below all thresholds
+
+    await cog._check_threshold(member, COMPLETED_SESSION)
+
+    db.clear_threshold_events.assert_called_once_with(123456789)
+
+
+async def test_cooldown_preserves_recent_events(cog, db, member):
+    """Events within cooldown_days are NOT cleared."""
+    # Last event was 1 day ago, cooldown is 3 days -> should NOT clear
+    db.get_last_threshold_event_time.return_value = (
+        datetime.now(timezone.utc) - timedelta(days=1)
+    )
+    db.get_playtime_for_window.return_value = 5.0
+
+    await cog._check_threshold(member, COMPLETED_SESSION)
+
+    db.clear_threshold_events.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tests: proactive warnings
+# ---------------------------------------------------------------------------
+
+
+async def test_proactive_warning_sent_at_threshold(cog, db, member):
+    """At 90% of next threshold (9h of 10h), a proactive DM is sent."""
+    db.get_playtime_for_window.return_value = 9.5  # 95% of 10h
+
+    await cog._check_threshold(member, COMPLETED_SESSION)
+
+    # No threshold was crossed, so no threshold events recorded
+    db.record_threshold_event.assert_not_called()
+
+    # Proactive warning should be sent
+    member.send.assert_called_once()
+    msg = member.send.call_args[0][0]
+    assert "9.5h" in msg
+    assert "10.0h" in msg
+    db.record_proactive_warning.assert_called_once()
+
+
+async def test_proactive_warning_not_sent_below_pct(cog, db, member):
+    """At 80% of threshold (8h of 10h), no proactive warning (pct=0.9)."""
+    db.get_playtime_for_window.return_value = 8.0  # 80% of 10h
+
+    await cog._check_threshold(member, COMPLETED_SESSION)
+
+    db.record_threshold_event.assert_not_called()
+    member.send.assert_not_called()
+    db.record_proactive_warning.assert_not_called()
+
+
+async def test_proactive_warning_dedup(cog, db, member):
+    """Proactive warning is not sent twice for the same rule in a window."""
+    db.get_playtime_for_window.return_value = 9.5
+    db.has_proactive_warning_been_sent.return_value = True  # Already warned
+
+    await cog._check_threshold(member, COMPLETED_SESSION)
+
+    member.send.assert_not_called()
+    db.record_proactive_warning.assert_not_called()
+
+
+async def test_proactive_warning_disabled_when_pct_zero(cog, db, member):
+    """No proactive warnings when warning_threshold_pct is 0."""
+    db.get_settings.return_value = BotSettings(
+        tracking_enabled=True,
+        target_game="League of Legends",
+        warning_threshold_pct=0.0,
+    )
+    db.get_playtime_for_window.return_value = 9.5
+
+    await cog._check_threshold(member, COMPLETED_SESSION)
+
+    member.send.assert_not_called()
+    db.record_proactive_warning.assert_not_called()

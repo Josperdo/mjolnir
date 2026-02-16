@@ -12,6 +12,7 @@ class User:
     """Represents a Discord user being tracked."""
     user_id: int  # Discord user ID
     opted_in: bool = False
+    exempt: bool = False
     created_at: Optional[datetime] = None
 
     def __post_init__(self):
@@ -52,6 +53,8 @@ class BotSettings:
     weekly_threshold_hours: float = 20.0
     timeout_duration_hours: int = 24
     announcement_channel_id: Optional[int] = None
+    warning_threshold_pct: float = 0.9
+    cooldown_days: int = 3
 
 
 @dataclass
@@ -77,3 +80,18 @@ class ThresholdEvent:
     def __post_init__(self):
         if self.triggered_at is None:
             self.triggered_at = datetime.now(timezone.utc)
+
+
+@dataclass
+class AuditLog:
+    """Records an admin action for accountability."""
+    id: Optional[int] = None
+    admin_id: int = 0
+    action_type: str = ""  # 'pardon', 'exempt', 'unexempt', 'reset_playtime'
+    target_user_id: int = 0
+    details: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+    def __post_init__(self):
+        if self.created_at is None:
+            self.created_at = datetime.now(timezone.utc)
