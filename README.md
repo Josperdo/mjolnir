@@ -138,7 +138,7 @@ Set `announcement_channel_id` in the settings table to a Discord channel ID. Whe
 
 ---
 
-### Phase 2: Configuration & Multiple Thresholds — IN PROGRESS
+### Phase 2: Configuration & Multiple Thresholds — IN TESTING
 **Goal:** Make the bot flexible with graduated consequences
 
 **Graduated Timeout System**
