@@ -4,6 +4,8 @@ Provides commands for users to opt-in/out and admins to control the bot.
 """
 import discord
 from datetime import datetime, timezone
+from typing import Optional
+
 from discord import app_commands
 from discord.ext import commands
 
@@ -214,139 +216,289 @@ class Admin(commands.Cog):
 
     # ===== Admin Commands =====
 
-    @app_commands.command(name="hammer", description="Control Mjolnir's tracking system")
-    @app_commands.describe(action="Enable, disable, or check status of tracking")
-    @app_commands.choices(action=[
-        app_commands.Choice(name="on", value="on"),
-        app_commands.Choice(name="off", value="off"),
-        app_commands.Choice(name="status", value="status"),
-    ])
-    @app_commands.checks.has_permissions(administrator=True)
-    async def hammer(self, interaction: discord.Interaction, action: str):
-        """
-        Admin command to control tracking.
+    hammer = app_commands.Group(
+        name="hammer",
+        description="Control Mjolnir's tracking system",
+        default_permissions=discord.Permissions(administrator=True),
+    )
 
-        Args:
-            interaction: Discord interaction
-            action: 'on', 'off', or 'status'
-        """
+    rules = app_commands.Group(
+        name="rules",
+        description="Manage threshold rules",
+        parent=hammer,
+    )
+
+    @hammer.command(name="on", description="Enable playtime tracking")
+    async def hammer_on(self, interaction: discord.Interaction):
+        """Enable playtime tracking."""
         settings = self.db.get_settings()
 
-        if action == "on":
-            if settings.tracking_enabled:
-                await interaction.response.send_message(
-                    "Tracking is already enabled.",
-                    ephemeral=True
-                )
-            else:
-                self.db.update_settings(tracking_enabled=True)
-                await interaction.response.send_message(
-                    "**Mjolnir activated!**\n\n"
-                    "Playtime tracking is now **enabled**.\n"
-                    f"Monitoring: **{settings.target_game}**",
-                    ephemeral=False  # Public announcement
-                )
-                print("Tracking enabled by admin")
-
-        elif action == "off":
-            if not settings.tracking_enabled:
-                await interaction.response.send_message(
-                    "Tracking is already disabled.",
-                    ephemeral=True
-                )
-            else:
-                self.db.update_settings(tracking_enabled=False)
-                await interaction.response.send_message(
-                    "**Mjolnir deactivated.**\n\n"
-                    "Playtime tracking is now **disabled**.\n"
-                    "Active sessions will not be tracked.",
-                    ephemeral=False  # Public announcement
-                )
-                print("Tracking disabled by admin")
-
-        elif action == "status":
-            # Get tracking status
-            status_emoji = "ON" if settings.tracking_enabled else "OFF"
-            status_text = "ENABLED" if settings.tracking_enabled else "DISABLED"
-
-            # Get count of opted-in users
-            opted_in_count = len(self.db.get_opted_in_users())
-
-            # Get threshold rules
-            rules = self.db.get_threshold_rules()
-
-            # Create status embed
-            embed = discord.Embed(
-                title="Mjolnir Status",
-                color=discord.Color.blue() if settings.tracking_enabled else discord.Color.red()
-            )
-
-            embed.add_field(
-                name="Tracking Status",
-                value=f"**{status_text}**",
-                inline=True
-            )
-
-            embed.add_field(
-                name="Opted-In Users",
-                value=f"**{opted_in_count}** users",
-                inline=True
-            )
-
-            embed.add_field(
-                name="Target Game",
-                value=f"**{settings.target_game}**",
-                inline=False
-            )
-
-            # Announcement channel
-            channel_text = "Not configured"
-            if settings.announcement_channel_id:
-                channel = self.bot.get_channel(settings.announcement_channel_id)
-                channel_text = channel.mention if channel else f"ID: {settings.announcement_channel_id}"
-            embed.add_field(
-                name="Announcement Channel",
-                value=channel_text,
-                inline=True,
-            )
-
-            # Rules summary grouped by window
-            if rules:
-                rules_by_window: dict[str, list] = {}
-                for rule in rules:
-                    rules_by_window.setdefault(rule.window_type, []).append(rule)
-
-                rules_lines = []
-                for window_type, window_rules in rules_by_window.items():
-                    label = WINDOW_LABELS.get(window_type, window_type)
-                    entries = []
-                    for r in window_rules:
-                        if r.action == "timeout":
-                            entries.append(f"{r.hours}h = {r.duration_hours}h timeout")
-                        else:
-                            entries.append(f"{r.hours}h = warning")
-                    rules_lines.append(f"**{label}:** {', '.join(entries)}")
-
-                embed.add_field(
-                    name="Threshold Rules",
-                    value="\n".join(rules_lines),
-                    inline=False,
-                )
-            else:
-                embed.add_field(
-                    name="Threshold Rules",
-                    value="No rules configured.",
-                    inline=False,
-                )
-
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @hammer.error
-    async def hammer_error(self, interaction: discord.Interaction, error):
-        """Handle errors for the hammer command."""
-        if isinstance(error, app_commands.errors.MissingPermissions):
+        if settings.tracking_enabled:
             await interaction.response.send_message(
-                "You need **Administrator** permissions to use this command.",
+                "Tracking is already enabled.",
+                ephemeral=True
+            )
+        else:
+            self.db.update_settings(tracking_enabled=True)
+            await interaction.response.send_message(
+                "**Mjolnir activated!**\n\n"
+                "Playtime tracking is now **enabled**.\n"
+                f"Monitoring: **{settings.target_game}**",
+                ephemeral=False
+            )
+            print("Tracking enabled by admin")
+
+    @hammer.command(name="off", description="Disable playtime tracking")
+    async def hammer_off(self, interaction: discord.Interaction):
+        """Disable playtime tracking."""
+        settings = self.db.get_settings()
+
+        if not settings.tracking_enabled:
+            await interaction.response.send_message(
+                "Tracking is already disabled.",
+                ephemeral=True
+            )
+        else:
+            self.db.update_settings(tracking_enabled=False)
+            await interaction.response.send_message(
+                "**Mjolnir deactivated.**\n\n"
+                "Playtime tracking is now **disabled**.\n"
+                "Active sessions will not be tracked.",
+                ephemeral=False
+            )
+            print("Tracking disabled by admin")
+
+    @hammer.command(name="status", description="View Mjolnir's current status and configuration")
+    async def hammer_status(self, interaction: discord.Interaction):
+        """Show bot status, settings, and rule summary."""
+        settings = self.db.get_settings()
+        status_text = "ENABLED" if settings.tracking_enabled else "DISABLED"
+        opted_in_count = len(self.db.get_opted_in_users())
+        rules = self.db.get_threshold_rules()
+
+        embed = discord.Embed(
+            title="Mjolnir Status",
+            color=discord.Color.blue() if settings.tracking_enabled else discord.Color.red()
+        )
+
+        embed.add_field(
+            name="Tracking Status",
+            value=f"**{status_text}**",
+            inline=True
+        )
+
+        embed.add_field(
+            name="Opted-In Users",
+            value=f"**{opted_in_count}** users",
+            inline=True
+        )
+
+        embed.add_field(
+            name="Target Game",
+            value=f"**{settings.target_game}**",
+            inline=False
+        )
+
+        channel_text = "Not configured"
+        if settings.announcement_channel_id:
+            channel = self.bot.get_channel(settings.announcement_channel_id)
+            channel_text = channel.mention if channel else f"ID: {settings.announcement_channel_id}"
+        embed.add_field(
+            name="Announcement Channel",
+            value=channel_text,
+            inline=True,
+        )
+
+        if rules:
+            rules_by_window: dict[str, list] = {}
+            for rule in rules:
+                rules_by_window.setdefault(rule.window_type, []).append(rule)
+
+            rules_lines = []
+            for window_type, window_rules in rules_by_window.items():
+                label = WINDOW_LABELS.get(window_type, window_type)
+                entries = []
+                for r in window_rules:
+                    if r.action == "timeout":
+                        entries.append(f"{r.hours}h = {r.duration_hours}h timeout")
+                    else:
+                        entries.append(f"{r.hours}h = warning")
+                rules_lines.append(f"**{label}:** {', '.join(entries)}")
+
+            embed.add_field(
+                name="Threshold Rules",
+                value="\n".join(rules_lines),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Threshold Rules",
+                value="No rules configured.",
+                inline=False,
+            )
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ----- /hammer setchannel -----
+
+    @hammer.command(
+        name="setchannel",
+        description="Set the announcement channel for threshold alerts"
+    )
+    @app_commands.describe(channel="The text channel to send announcements to")
+    async def hammer_setchannel(
+        self, interaction: discord.Interaction, channel: discord.TextChannel
+    ):
+        """Set the announcement channel."""
+        self.db.update_settings(announcement_channel_id=channel.id)
+        await interaction.response.send_message(
+            f"Announcement channel set to {channel.mention}.",
+            ephemeral=True
+        )
+        print(f"Announcement channel set to #{channel.name} by admin")
+
+    # ----- /hammer setgame -----
+
+    @hammer.command(name="setgame", description="Change the target game to monitor")
+    @app_commands.describe(game="The game name to track (case-insensitive matching)")
+    async def hammer_setgame(self, interaction: discord.Interaction, game: str):
+        """Change the target game being tracked."""
+        game = game.strip()
+        if not game:
+            await interaction.response.send_message(
+                "Game name cannot be empty.", ephemeral=True
+            )
+            return
+
+        self.db.update_settings(target_game=game)
+        await interaction.response.send_message(
+            f"Target game updated to **{game}**.",
+            ephemeral=True
+        )
+        print(f"Target game changed to '{game}' by admin")
+
+    # ----- /hammer rules list -----
+
+    @rules.command(name="list", description="View all threshold rules")
+    async def rules_list(self, interaction: discord.Interaction):
+        """Display every threshold rule grouped by window type."""
+        all_rules = self.db.get_threshold_rules()
+
+        if not all_rules:
+            await interaction.response.send_message(
+                "No threshold rules configured.\n"
+                "Use `/hammer rules add` to create one.",
+                ephemeral=True
+            )
+            return
+
+        rules_by_window: dict[str, list] = {}
+        for rule in all_rules:
+            rules_by_window.setdefault(rule.window_type, []).append(rule)
+
+        embed = discord.Embed(title="Threshold Rules", color=discord.Color.blue())
+
+        for window_type in ["rolling_7d", "daily", "weekly", "session"]:
+            window_rules = rules_by_window.get(window_type)
+            if not window_rules:
+                continue
+
+            label = WINDOW_LABELS.get(window_type, window_type)
+            lines = []
+            for r in window_rules:
+                if r.action == "timeout":
+                    lines.append(
+                        f"`#{r.id}` — **{r.hours}h** = "
+                        f"**{r.duration_hours}h** timeout"
+                    )
+                else:
+                    lines.append(f"`#{r.id}` — **{r.hours}h** = warning")
+            embed.add_field(name=label, value="\n".join(lines), inline=False)
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ----- /hammer rules add -----
+
+    @rules.command(name="add", description="Add a new threshold rule")
+    @app_commands.describe(
+        hours="Playtime threshold in hours",
+        action="Action to take when threshold is reached",
+        duration="Timeout duration in hours (required for timeout action)",
+        window="Time window for this rule",
+    )
+    @app_commands.choices(
+        action=[
+            app_commands.Choice(name="warn", value="warn"),
+            app_commands.Choice(name="timeout", value="timeout"),
+        ],
+        window=[
+            app_commands.Choice(name="Rolling 7-Day", value="rolling_7d"),
+            app_commands.Choice(name="Daily (24h)", value="daily"),
+            app_commands.Choice(name="Calendar Week", value="weekly"),
+            app_commands.Choice(name="Per Session", value="session"),
+        ],
+    )
+    async def rules_add(
+        self,
+        interaction: discord.Interaction,
+        hours: float,
+        action: str,
+        window: str,
+        duration: Optional[int] = None,
+    ):
+        """Add a threshold rule after validating inputs."""
+        if hours <= 0:
+            await interaction.response.send_message(
+                "Hours must be greater than 0.", ephemeral=True
+            )
+            return
+
+        if action == "timeout" and (duration is None or duration <= 0):
+            await interaction.response.send_message(
+                "A timeout rule requires a positive duration (hours).",
+                ephemeral=True
+            )
+            return
+
+        if action == "warn":
+            duration = None
+
+        rule = self.db.add_threshold_rule(
+            hours=hours,
+            action=action,
+            duration_hours=duration,
+            window_type=window,
+        )
+
+        label = WINDOW_LABELS.get(window, window)
+        if action == "timeout":
+            desc = f"**{hours}h** = **{duration}h** timeout"
+        else:
+            desc = f"**{hours}h** = warning"
+
+        await interaction.response.send_message(
+            f"Rule `#{rule.id}` added to **{label}**:\n{desc}",
+            ephemeral=True
+        )
+        print(f"Threshold rule #{rule.id} added by admin")
+
+    # ----- /hammer rules remove -----
+
+    @rules.command(name="remove", description="Remove a threshold rule by ID")
+    @app_commands.describe(rule_id="The rule ID to remove (shown in rules list)")
+    async def rules_remove(self, interaction: discord.Interaction, rule_id: int):
+        """Delete a threshold rule."""
+        deleted = self.db.delete_threshold_rule(rule_id)
+
+        if deleted:
+            await interaction.response.send_message(
+                f"Rule `#{rule_id}` has been removed.",
+                ephemeral=True
+            )
+            print(f"Threshold rule #{rule_id} removed by admin")
+        else:
+            await interaction.response.send_message(
+                f"No rule found with ID `#{rule_id}`.",
                 ephemeral=True
             )
 

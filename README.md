@@ -158,11 +158,11 @@ Set `announcement_channel_id` in the settings table to a Discord channel ID. Whe
 - [x] `/mystats` shows progress across all active windows
 
 **Admin Configuration Commands**
-- [ ] `/hammer rules list` - View all threshold rules
-- [ ] `/hammer rules add <hours> <action> <duration> <window>` - Add a rule
-- [ ] `/hammer rules remove <id>` - Remove a rule
-- [ ] `/hammer setchannel` - Set announcement channel from Discord
-- [ ] `/settings set-game <game_name>` - Change target game
+- [x] `/hammer rules list` - View all threshold rules
+- [x] `/hammer rules add <hours> <action> <duration> <window>` - Add a rule
+- [x] `/hammer rules remove <id>` - Remove a rule
+- [x] `/hammer setchannel` - Set announcement channel from Discord
+- [x] `/hammer setgame <game_name>` - Change target game
 
 **Manual Override Commands**
 - [ ] `/pardon <user>` - Remove user's timeout early

@@ -285,6 +285,53 @@ class Database:
             for row in cursor.fetchall()
         ]
 
+    def get_threshold_rule(self, rule_id: int) -> Optional[ThresholdRule]:
+        """Get a single threshold rule by ID."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM threshold_rules WHERE id = ?", (rule_id,))
+        row = cursor.fetchone()
+
+        if row:
+            return ThresholdRule(
+                id=row["id"],
+                hours=row["hours"],
+                action=row["action"],
+                duration_hours=row["duration_hours"],
+                message=row["message"],
+                window_type=row["window_type"],
+            )
+        return None
+
+    def add_threshold_rule(self, hours: float, action: str,
+                           duration_hours: Optional[int] = None,
+                           message: Optional[str] = None,
+                           window_type: str = "rolling_7d") -> ThresholdRule:
+        """Add a new threshold rule and return it."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """INSERT INTO threshold_rules
+               (hours, action, duration_hours, message, window_type)
+               VALUES (?, ?, ?, ?, ?)""",
+            (hours, action, duration_hours, message, window_type)
+        )
+        self.conn.commit()
+
+        return ThresholdRule(
+            id=cursor.lastrowid,
+            hours=hours,
+            action=action,
+            duration_hours=duration_hours,
+            message=message,
+            window_type=window_type,
+        )
+
+    def delete_threshold_rule(self, rule_id: int) -> bool:
+        """Delete a threshold rule by ID. Returns True if a row was deleted."""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM threshold_rules WHERE id = ?", (rule_id,))
+        self.conn.commit()
+        return cursor.rowcount > 0
+
     def get_daily_playtime(self, user_id: int) -> float:
         """Get total playtime in hours for the past 24 hours."""
         cursor = self.conn.cursor()

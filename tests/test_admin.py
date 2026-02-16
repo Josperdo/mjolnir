@@ -202,3 +202,227 @@ async def test_mystats_no_upcoming_when_all_exceeded(cog, db, interaction):
     embed = interaction.response.send_message.call_args[1]["embed"]
     upcoming_field = next((f for f in embed.fields if f.name == "Upcoming Thresholds"), None)
     assert upcoming_field is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: /hammer on / off / status
+# ---------------------------------------------------------------------------
+
+
+async def test_hammer_on_enables_tracking(cog, db, interaction):
+    """Turning on tracking when currently disabled."""
+    db.get_settings.return_value = BotSettings(tracking_enabled=False)
+
+    await cog.hammer_on.callback(cog, interaction)
+
+    db.update_settings.assert_called_once_with(tracking_enabled=True)
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "activated" in msg.lower()
+
+
+async def test_hammer_on_already_enabled(cog, db, interaction):
+    """If tracking is already on, report that without updating."""
+    db.get_settings.return_value = DEFAULT_SETTINGS  # tracking_enabled=True
+
+    await cog.hammer_on.callback(cog, interaction)
+
+    db.update_settings.assert_not_called()
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "already enabled" in msg.lower()
+
+
+async def test_hammer_off_disables_tracking(cog, db, interaction):
+    """Turning off tracking when currently enabled."""
+    db.get_settings.return_value = DEFAULT_SETTINGS  # tracking_enabled=True
+
+    await cog.hammer_off.callback(cog, interaction)
+
+    db.update_settings.assert_called_once_with(tracking_enabled=False)
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "deactivated" in msg.lower()
+
+
+async def test_hammer_off_already_disabled(cog, db, interaction):
+    """If tracking is already off, report that without updating."""
+    db.get_settings.return_value = BotSettings(tracking_enabled=False)
+
+    await cog.hammer_off.callback(cog, interaction)
+
+    db.update_settings.assert_not_called()
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "already disabled" in msg.lower()
+
+
+async def test_hammer_status_shows_embed(cog, db, interaction):
+    """Status command returns an embed with key fields."""
+    db.get_settings.return_value = DEFAULT_SETTINGS
+    db.get_opted_in_users.return_value = [1, 2, 3]
+    cog.bot.get_channel.return_value = None
+
+    await cog.hammer_status.callback(cog, interaction)
+
+    embed = interaction.response.send_message.call_args[1]["embed"]
+    assert embed.title == "Mjolnir Status"
+    field_names = [f.name for f in embed.fields]
+    assert "Tracking Status" in field_names
+    assert "Opted-In Users" in field_names
+    assert "Target Game" in field_names
+
+
+# ---------------------------------------------------------------------------
+# Tests: /hammer setchannel
+# ---------------------------------------------------------------------------
+
+
+async def test_setchannel_saves_channel_id(cog, db, interaction):
+    """setchannel stores the channel id in settings."""
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = 999888777
+    channel.mention = "#announcements"
+
+    await cog.hammer_setchannel.callback(cog, interaction, channel)
+
+    db.update_settings.assert_called_once_with(announcement_channel_id=999888777)
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "#announcements" in msg
+
+
+# ---------------------------------------------------------------------------
+# Tests: /hammer setgame
+# ---------------------------------------------------------------------------
+
+
+async def test_setgame_updates_target(cog, db, interaction):
+    """setgame stores new game name in settings."""
+    await cog.hammer_setgame.callback(cog, interaction, "Valorant")
+
+    db.update_settings.assert_called_once_with(target_game="Valorant")
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "Valorant" in msg
+
+
+async def test_setgame_rejects_empty(cog, db, interaction):
+    """setgame rejects an empty string."""
+    await cog.hammer_setgame.callback(cog, interaction, "   ")
+
+    db.update_settings.assert_not_called()
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "cannot be empty" in msg.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests: /hammer rules list
+# ---------------------------------------------------------------------------
+
+
+async def test_rules_list_shows_all_rules(cog, db, interaction):
+    """rules list returns an embed with rule IDs."""
+    await cog.rules_list.callback(cog, interaction)
+
+    embed = interaction.response.send_message.call_args[1]["embed"]
+    assert embed.title == "Threshold Rules"
+    # All 4 default rules should appear
+    text = "\n".join(f.value for f in embed.fields)
+    assert "#1" in text
+    assert "#4" in text
+
+
+async def test_rules_list_empty(cog, db, interaction):
+    """rules list when no rules exist shows helpful message."""
+    db.get_threshold_rules.return_value = []
+
+    await cog.rules_list.callback(cog, interaction)
+
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "no threshold rules" in msg.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests: /hammer rules add
+# ---------------------------------------------------------------------------
+
+
+async def test_rules_add_warn(cog, db, interaction):
+    """Adding a warn rule calls add_threshold_rule correctly."""
+    db.add_threshold_rule.return_value = ThresholdRule(
+        id=5, hours=8.0, action="warn", window_type="daily"
+    )
+
+    await cog.rules_add.callback(
+        cog, interaction, hours=8.0, action="warn", window="daily"
+    )
+
+    db.add_threshold_rule.assert_called_once_with(
+        hours=8.0, action="warn", duration_hours=None, window_type="daily"
+    )
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "#5" in msg
+    assert "warning" in msg.lower()
+
+
+async def test_rules_add_timeout(cog, db, interaction):
+    """Adding a timeout rule stores hours and duration."""
+    db.add_threshold_rule.return_value = ThresholdRule(
+        id=6, hours=12.0, action="timeout", duration_hours=2, window_type="rolling_7d"
+    )
+
+    await cog.rules_add.callback(
+        cog, interaction, hours=12.0, action="timeout",
+        window="rolling_7d", duration=2
+    )
+
+    db.add_threshold_rule.assert_called_once_with(
+        hours=12.0, action="timeout", duration_hours=2, window_type="rolling_7d"
+    )
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "#6" in msg
+    assert "timeout" in msg.lower()
+
+
+async def test_rules_add_timeout_missing_duration(cog, db, interaction):
+    """Timeout rule without duration is rejected."""
+    await cog.rules_add.callback(
+        cog, interaction, hours=10.0, action="timeout", window="rolling_7d"
+    )
+
+    db.add_threshold_rule.assert_not_called()
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "duration" in msg.lower()
+
+
+async def test_rules_add_invalid_hours(cog, db, interaction):
+    """Zero or negative hours is rejected."""
+    await cog.rules_add.callback(
+        cog, interaction, hours=0, action="warn", window="daily"
+    )
+
+    db.add_threshold_rule.assert_not_called()
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "greater than 0" in msg.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests: /hammer rules remove
+# ---------------------------------------------------------------------------
+
+
+async def test_rules_remove_success(cog, db, interaction):
+    """Removing an existing rule returns confirmation."""
+    db.delete_threshold_rule.return_value = True
+
+    await cog.rules_remove.callback(cog, interaction, rule_id=2)
+
+    db.delete_threshold_rule.assert_called_once_with(2)
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "#2" in msg
+    assert "removed" in msg.lower()
+
+
+async def test_rules_remove_not_found(cog, db, interaction):
+    """Removing a non-existent rule returns not-found message."""
+    db.delete_threshold_rule.return_value = False
+
+    await cog.rules_remove.callback(cog, interaction, rule_id=999)
+
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "no rule found" in msg.lower()
