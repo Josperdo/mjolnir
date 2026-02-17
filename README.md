@@ -80,7 +80,8 @@ pytest tests/ -v
 ### User Commands
 - `/opt-in` - Start tracking your playtime (shows threshold rules summary)
 - `/opt-out` - Stop tracking your playtime
-- `/mystats` - View playtime across all windows, progress bars, upcoming thresholds, and active session
+- `/mystats` - View playtime across all windows, progress bars, daily breakdown, session stats, warning/timeout history, and active session
+- `/leaderboard` - View server-wide playtime rankings for the last 7 days (opted-in users only)
 
 ### Admin Commands (Requires Administrator permission)
 - `/hammer on` - Enable playtime tracking globally
@@ -178,15 +179,15 @@ Set `announcement_channel_id` in the settings table to a Discord channel ID. Whe
 
 ---
 
-### Phase 3: Cosmetic Features & Polish — PLANNED
+### Phase 3: Cosmetic Features & Polish — IN PROGRESS
 **Goal:** Improve user experience and add fun features
 
 **User Stats & Dashboard**
-- [ ] `/mystats` enhancements: daily breakdown, total session count, warning status
-- [ ] `/leaderboard` - Server-wide playtime rankings (opt-in only)
-  - [ ] Most hours played
-  - [ ] Longest single session
-  - [ ] Most frequent player
+- [x] `/mystats` enhancements: daily breakdown, total session count, warning status
+- [x] `/leaderboard` - Server-wide playtime rankings (opt-in only)
+  - [x] Most hours played
+  - [x] Longest single session
+  - [x] Most frequent player
 
 **Enhanced Notifications**
 - [ ] Admin-customizable roast messages (move from hardcoded to DB table)
@@ -229,8 +230,8 @@ Set `announcement_channel_id` in the settings table to a Discord channel ID. Whe
 ## Current Status
 
 - **Phase 1** — Complete
-- **Phase 2** — In progress (graduated timeouts + multi-window done, admin commands next)
-- **Phase 3** — Planned
+- **Phase 2** — In Testing
+- **Phase 3** — In Progress (leaderboard + mystats enhancements done)
 
 ---
 

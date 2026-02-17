@@ -32,6 +32,16 @@ def db():
     """Mock database. Each method is a MagicMock we configure per-test."""
     mock = MagicMock()
     mock.get_threshold_rules.return_value = DEFAULT_RULES
+    # Defaults for mystats enhanced fields
+    mock.get_daily_breakdown.return_value = [
+        ("2026-02-10", 0.0), ("2026-02-11", 0.0), ("2026-02-12", 0.0),
+        ("2026-02-13", 0.0), ("2026-02-14", 0.0), ("2026-02-15", 0.0),
+        ("2026-02-16", 0.0),
+    ]
+    mock.get_session_stats.return_value = {
+        "session_count": 0, "longest_session_hours": 0.0, "avg_session_hours": 0.0,
+    }
+    mock.get_warning_timeout_counts.return_value = {"warn": 0, "timeout": 0}
     return mock
 
 
@@ -562,3 +572,159 @@ async def test_audit_empty(cog, db, interaction):
 
     msg = interaction.response.send_message.call_args[0][0]
     assert "no audit log" in msg.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests: /leaderboard
+# ---------------------------------------------------------------------------
+
+
+async def test_leaderboard_shows_all_categories(cog, db, interaction):
+    """Leaderboard embed has 3 fields when all categories have data."""
+    db.get_leaderboard_most_hours.return_value = [(111, 10.5), (222, 8.0)]
+    db.get_leaderboard_longest_session.return_value = [(222, 5.0), (111, 3.2)]
+    db.get_leaderboard_most_sessions.return_value = [(111, 12), (222, 8)]
+
+    await cog.leaderboard.callback(cog, interaction)
+
+    embed = interaction.response.send_message.call_args[1]["embed"]
+    assert "Leaderboard" in embed.title
+    assert len(embed.fields) == 3
+    assert "10.5" in embed.fields[0].value
+    assert "5.0" in embed.fields[1].value
+    assert "12 sessions" in embed.fields[2].value
+
+
+async def test_leaderboard_empty_data(cog, db, interaction):
+    """No data returns a plain text message, not an embed."""
+    db.get_leaderboard_most_hours.return_value = []
+    db.get_leaderboard_longest_session.return_value = []
+    db.get_leaderboard_most_sessions.return_value = []
+
+    await cog.leaderboard.callback(cog, interaction)
+
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "no playtime data" in msg.lower()
+
+
+async def test_leaderboard_partial_data(cog, db, interaction):
+    """Only some categories have data — embed still works."""
+    db.get_leaderboard_most_hours.return_value = [(111, 5.0)]
+    db.get_leaderboard_longest_session.return_value = []
+    db.get_leaderboard_most_sessions.return_value = [(111, 3)]
+
+    await cog.leaderboard.callback(cog, interaction)
+
+    embed = interaction.response.send_message.call_args[1]["embed"]
+    assert len(embed.fields) == 2
+    field_names = [f.name for f in embed.fields]
+    assert "Most Hours Played" in field_names
+    assert "Most Frequent Player" in field_names
+    assert "Longest Single Session" not in field_names
+
+
+async def test_leaderboard_is_public(cog, db, interaction):
+    """Leaderboard is sent publicly (not ephemeral)."""
+    db.get_leaderboard_most_hours.return_value = [(111, 5.0)]
+    db.get_leaderboard_longest_session.return_value = []
+    db.get_leaderboard_most_sessions.return_value = []
+
+    await cog.leaderboard.callback(cog, interaction)
+
+    kwargs = interaction.response.send_message.call_args[1]
+    assert kwargs.get("ephemeral") is not True
+
+
+# ---------------------------------------------------------------------------
+# Tests: /mystats enhancements
+# ---------------------------------------------------------------------------
+
+
+async def test_mystats_daily_breakdown_field(cog, db, interaction):
+    """Daily breakdown field shows day abbreviations and hours."""
+    db.get_user.return_value = User(user_id=123456789, opted_in=True)
+    db.get_settings.return_value = DEFAULT_SETTINGS
+    db.get_playtime_for_window.return_value = 3.0
+    db.get_active_session.return_value = None
+    db.get_daily_breakdown.return_value = [
+        ("2026-02-10", 1.0), ("2026-02-11", 0.0), ("2026-02-12", 2.5),
+        ("2026-02-13", 0.0), ("2026-02-14", 0.5), ("2026-02-15", 3.0),
+        ("2026-02-16", 0.0),
+    ]
+
+    await cog.mystats.callback(cog, interaction)
+
+    embed = interaction.response.send_message.call_args[1]["embed"]
+    breakdown_field = next(
+        (f for f in embed.fields if "Daily Breakdown" in f.name), None
+    )
+    assert breakdown_field is not None
+    assert "1.0h" in breakdown_field.value
+    assert "2.5h" in breakdown_field.value
+    # Should contain day abbreviations
+    assert "Tue" in breakdown_field.value or "Mon" in breakdown_field.value
+
+
+async def test_mystats_session_stats_field(cog, db, interaction):
+    """Session stats field shows count, longest, and average."""
+    db.get_user.return_value = User(user_id=123456789, opted_in=True)
+    db.get_settings.return_value = DEFAULT_SETTINGS
+    db.get_playtime_for_window.return_value = 5.0
+    db.get_active_session.return_value = None
+    db.get_session_stats.return_value = {
+        "session_count": 10,
+        "longest_session_hours": 3.5,
+        "avg_session_hours": 1.2,
+    }
+
+    await cog.mystats.callback(cog, interaction)
+
+    embed = interaction.response.send_message.call_args[1]["embed"]
+    stats_field = next(
+        (f for f in embed.fields if "Session Stats" in f.name), None
+    )
+    assert stats_field is not None
+    assert "10" in stats_field.value
+    assert "3.5" in stats_field.value
+    assert "1.2" in stats_field.value
+
+
+async def test_mystats_warning_timeout_counts(cog, db, interaction):
+    """Warnings & Timeouts field shows counts."""
+    db.get_user.return_value = User(user_id=123456789, opted_in=True)
+    db.get_settings.return_value = DEFAULT_SETTINGS
+    db.get_playtime_for_window.return_value = 5.0
+    db.get_active_session.return_value = None
+    db.get_warning_timeout_counts.return_value = {"warn": 3, "timeout": 1}
+
+    await cog.mystats.callback(cog, interaction)
+
+    embed = interaction.response.send_message.call_args[1]["embed"]
+    wt_field = next(
+        (f for f in embed.fields if "Warnings & Timeouts" in f.name), None
+    )
+    assert wt_field is not None
+    assert "3" in wt_field.value
+    assert "1" in wt_field.value
+
+
+async def test_mystats_zero_stats(cog, db, interaction):
+    """All-zero stats still render gracefully."""
+    db.get_user.return_value = User(user_id=123456789, opted_in=True)
+    db.get_settings.return_value = DEFAULT_SETTINGS
+    db.get_playtime_for_window.return_value = 0.0
+    db.get_active_session.return_value = None
+
+    await cog.mystats.callback(cog, interaction)
+
+    embed = interaction.response.send_message.call_args[1]["embed"]
+    stats_field = next(
+        (f for f in embed.fields if "Session Stats" in f.name), None
+    )
+    assert stats_field is not None
+    assert "0" in stats_field.value
+
+    wt_field = next(
+        (f for f in embed.fields if "Warnings & Timeouts" in f.name), None
+    )
+    assert wt_field is not None

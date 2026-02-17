@@ -635,6 +635,114 @@ class Database:
         row = cursor.fetchone()
         return row["latest"] if row and row["latest"] else None
 
+    # ===== Leaderboard queries =====
+
+    def get_leaderboard_most_hours(self, days: int = 7, limit: int = 5) -> list[tuple[int, float]]:
+        """Get top users by total playtime hours in the rolling window."""
+        cursor = self.conn.cursor()
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cursor.execute("""
+            SELECT ps.user_id, SUM(ps.duration_seconds) as total
+            FROM play_sessions ps
+            JOIN users u ON ps.user_id = u.user_id
+            WHERE u.opted_in = 1
+              AND ps.end_time IS NOT NULL
+              AND ps.start_time >= ?
+            GROUP BY ps.user_id
+            ORDER BY total DESC
+            LIMIT ?
+        """, (cutoff, limit))
+        return [(row["user_id"], (row["total"] or 0) / 3600) for row in cursor.fetchall()]
+
+    def get_leaderboard_longest_session(self, days: int = 7, limit: int = 5) -> list[tuple[int, float]]:
+        """Get top users by their single longest session in the window."""
+        cursor = self.conn.cursor()
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cursor.execute("""
+            SELECT ps.user_id, MAX(ps.duration_seconds) as longest
+            FROM play_sessions ps
+            JOIN users u ON ps.user_id = u.user_id
+            WHERE u.opted_in = 1
+              AND ps.end_time IS NOT NULL
+              AND ps.start_time >= ?
+            GROUP BY ps.user_id
+            ORDER BY longest DESC
+            LIMIT ?
+        """, (cutoff, limit))
+        return [(row["user_id"], (row["longest"] or 0) / 3600) for row in cursor.fetchall()]
+
+    def get_leaderboard_most_sessions(self, days: int = 7, limit: int = 5) -> list[tuple[int, int]]:
+        """Get top users by session count in the window."""
+        cursor = self.conn.cursor()
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cursor.execute("""
+            SELECT ps.user_id, COUNT(*) as cnt
+            FROM play_sessions ps
+            JOIN users u ON ps.user_id = u.user_id
+            WHERE u.opted_in = 1
+              AND ps.end_time IS NOT NULL
+              AND ps.start_time >= ?
+            GROUP BY ps.user_id
+            ORDER BY cnt DESC
+            LIMIT ?
+        """, (cutoff, limit))
+        return [(row["user_id"], row["cnt"]) for row in cursor.fetchall()]
+
+    # ===== User stats queries =====
+
+    def get_daily_breakdown(self, user_id: int, days: int = 7) -> list[tuple[str, float]]:
+        """Get hours per day for the last N days, filling gaps with 0.0."""
+        cursor = self.conn.cursor()
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cursor.execute("""
+            SELECT DATE(start_time) as day, SUM(duration_seconds) as total
+            FROM play_sessions
+            WHERE user_id = ? AND start_time >= ? AND end_time IS NOT NULL
+            GROUP BY DATE(start_time)
+            ORDER BY day ASC
+        """, (user_id, cutoff))
+        rows = {row["day"]: (row["total"] or 0) / 3600 for row in cursor.fetchall()}
+
+        result = []
+        for i in range(days - 1, -1, -1):
+            d = (datetime.now(timezone.utc) - timedelta(days=i)).strftime("%Y-%m-%d")
+            result.append((d, rows.get(d, 0.0)))
+        return result
+
+    def get_session_stats(self, user_id: int, days: int = 7) -> dict:
+        """Get session count, longest session, and average session length."""
+        cursor = self.conn.cursor()
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cursor.execute("""
+            SELECT COUNT(*) as cnt,
+                   MAX(duration_seconds) as longest,
+                   AVG(duration_seconds) as average
+            FROM play_sessions
+            WHERE user_id = ? AND start_time >= ? AND end_time IS NOT NULL
+        """, (user_id, cutoff))
+        row = cursor.fetchone()
+        return {
+            "session_count": row["cnt"] or 0,
+            "longest_session_hours": (row["longest"] or 0) / 3600,
+            "avg_session_hours": (row["average"] or 0) / 3600,
+        }
+
+    def get_warning_timeout_counts(self, user_id: int) -> dict:
+        """Get count of warnings and timeouts from threshold events."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT tr.action, COUNT(*) as cnt
+            FROM threshold_events te
+            JOIN threshold_rules tr ON te.rule_id = tr.id
+            WHERE te.user_id = ?
+            GROUP BY tr.action
+        """, (user_id,))
+        result = {"warn": 0, "timeout": 0}
+        for row in cursor.fetchall():
+            if row["action"] in result:
+                result[row["action"]] = row["cnt"]
+        return result
+
     def close(self):
         """Close database connection."""
         self.conn.close()

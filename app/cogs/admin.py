@@ -3,7 +3,7 @@ Admin cog for Mjolnir.
 Provides commands for users to opt-in/out and admins to control the bot.
 """
 import discord
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from discord import app_commands
@@ -175,6 +175,41 @@ class Admin(commands.Cog):
                 inline=True,
             )
 
+        # Daily breakdown (last 7 days)
+        daily_breakdown = self.db.get_daily_breakdown(interaction.user.id)
+        day_labels = []
+        for date_str, hours in daily_breakdown:
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            day_labels.append(f"{dt.strftime('%a')}: {hours:.1f}h")
+        embed.add_field(
+            name="Daily Breakdown (Last 7 Days)",
+            value=" | ".join(day_labels),
+            inline=False,
+        )
+
+        # Session stats
+        session_stats = self.db.get_session_stats(interaction.user.id)
+        embed.add_field(
+            name="Session Stats",
+            value=(
+                f"Total sessions: {session_stats['session_count']}\n"
+                f"Longest: {session_stats['longest_session_hours']:.1f}h\n"
+                f"Average: {session_stats['avg_session_hours']:.1f}h"
+            ),
+            inline=True,
+        )
+
+        # Warning & timeout counts
+        wt_counts = self.db.get_warning_timeout_counts(interaction.user.id)
+        embed.add_field(
+            name="Warnings & Timeouts",
+            value=(
+                f"Warnings: {wt_counts['warn']}\n"
+                f"Timeouts: {wt_counts['timeout']}"
+            ),
+            inline=True,
+        )
+
         # Upcoming thresholds summary
         upcoming_lines = []
         for window_type, window_rules in rules_by_window.items():
@@ -213,6 +248,48 @@ class Admin(commands.Cog):
             embed.color = discord.Color.green()
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="leaderboard", description="View server-wide playtime rankings (opted-in users only)")
+    async def leaderboard(self, interaction: discord.Interaction):
+        """Show server-wide playtime leaderboard for the last 7 days."""
+        most_hours = self.db.get_leaderboard_most_hours()
+        longest_session = self.db.get_leaderboard_longest_session()
+        most_sessions = self.db.get_leaderboard_most_sessions()
+
+        if not most_hours and not longest_session and not most_sessions:
+            await interaction.response.send_message(
+                "No playtime data available for the last 7 days.",
+                ephemeral=True
+            )
+            return
+
+        embed = discord.Embed(
+            title="Playtime Leaderboard (Last 7 Days)",
+            color=discord.Color.gold()
+        )
+
+        if most_hours:
+            lines = [
+                f"{i+1}. <@{uid}> — {hours:.1f}h"
+                for i, (uid, hours) in enumerate(most_hours)
+            ]
+            embed.add_field(name="Most Hours Played", value="\n".join(lines), inline=False)
+
+        if longest_session:
+            lines = [
+                f"{i+1}. <@{uid}> — {hours:.1f}h"
+                for i, (uid, hours) in enumerate(longest_session)
+            ]
+            embed.add_field(name="Longest Single Session", value="\n".join(lines), inline=False)
+
+        if most_sessions:
+            lines = [
+                f"{i+1}. <@{uid}> — {count} sessions"
+                for i, (uid, count) in enumerate(most_sessions)
+            ]
+            embed.add_field(name="Most Frequent Player", value="\n".join(lines), inline=False)
+
+        await interaction.response.send_message(embed=embed)
 
     # ===== Admin Commands =====
 
