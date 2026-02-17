@@ -13,6 +13,7 @@ class User:
     user_id: int  # Discord user ID
     opted_in: bool = False
     exempt: bool = False
+    leaderboard_visible: bool = True
     created_at: Optional[datetime] = None
 
     def __post_init__(self):

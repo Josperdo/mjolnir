@@ -203,9 +203,9 @@ Set `announcement_channel_id` in the settings table to a Discord channel ID. Whe
 - [x] Identify patterns (e.g., "You play most on weekends")
 
 **Data Management**
-- [ ] `/export` - Export your data as JSON (GDPR compliance)
-- [ ] `/delete-my-data` - Remove all your tracking data
-- [ ] Privacy controls per user
+- [x] `/export` - Export your data as JSON (GDPR compliance)
+- [x] `/delete-my-data` - Remove all your tracking data
+- [x] Privacy controls per user
 
 **Multi-Game Support**
 - [ ] Track multiple games with separate limits

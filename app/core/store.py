@@ -167,6 +167,7 @@ class Database:
         """Add columns that may not exist in older databases."""
         migrations = [
             ("users", "exempt", "INTEGER NOT NULL DEFAULT 0"),
+            ("users", "leaderboard_visible", "INTEGER NOT NULL DEFAULT 1"),
             ("settings", "warning_threshold_pct", "REAL NOT NULL DEFAULT 0.9"),
             ("settings", "cooldown_days", "INTEGER NOT NULL DEFAULT 3"),
             ("settings", "weekly_recap_day", "INTEGER NOT NULL DEFAULT 0"),
@@ -194,6 +195,7 @@ class Database:
                 user_id=row["user_id"],
                 opted_in=bool(row["opted_in"]),
                 exempt=bool(row["exempt"]),
+                leaderboard_visible=bool(row["leaderboard_visible"]),
                 created_at=row["created_at"]
             )
         return None
@@ -242,6 +244,18 @@ class Database:
         )
         self.conn.commit()
 
+    def set_leaderboard_visible(self, user_id: int, visible: bool):
+        """Set whether the user appears on leaderboards. Creates user if needed."""
+        user = self.get_user(user_id)
+        if user is None:
+            self.create_user(user_id, opted_in=False)
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "UPDATE users SET leaderboard_visible = ? WHERE user_id = ?",
+            (int(visible), user_id)
+        )
+        self.conn.commit()
+
     def delete_user_sessions(self, user_id: int) -> int:
         """Delete all play sessions for a user. Returns count of deleted rows."""
         cursor = self.conn.cursor()
@@ -259,6 +273,97 @@ class Database:
         )
         self.conn.commit()
         return cursor.rowcount
+
+    def clear_proactive_warnings(self, user_id: int) -> int:
+        """Delete all proactive warnings for a user. Returns count of deleted rows."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM proactive_warnings WHERE user_id = ?", (user_id,)
+        )
+        self.conn.commit()
+        return cursor.rowcount
+
+    def get_user_export_data(self, user_id: int) -> dict:
+        """Collect all stored data for a user (for GDPR export)."""
+        user = self.get_user(user_id)
+        cursor = self.conn.cursor()
+
+        cursor.execute(
+            "SELECT * FROM play_sessions WHERE user_id = ? ORDER BY start_time",
+            (user_id,)
+        )
+        sessions = [
+            {
+                "id": row["id"],
+                "game_name": row["game_name"],
+                "start_time": str(row["start_time"]) if row["start_time"] else None,
+                "end_time": str(row["end_time"]) if row["end_time"] else None,
+                "duration_seconds": row["duration_seconds"],
+            }
+            for row in cursor.fetchall()
+        ]
+
+        cursor.execute(
+            "SELECT * FROM threshold_events WHERE user_id = ? ORDER BY triggered_at",
+            (user_id,)
+        )
+        events = [
+            {
+                "id": row["id"],
+                "rule_id": row["rule_id"],
+                "triggered_at": str(row["triggered_at"]) if row["triggered_at"] else None,
+                "window_type": row["window_type"],
+            }
+            for row in cursor.fetchall()
+        ]
+
+        cursor.execute(
+            "SELECT * FROM proactive_warnings WHERE user_id = ? ORDER BY warned_at",
+            (user_id,)
+        )
+        warnings = [
+            {
+                "id": row["id"],
+                "rule_id": row["rule_id"],
+                "warned_at": str(row["warned_at"]) if row["warned_at"] else None,
+                "window_type": row["window_type"],
+            }
+            for row in cursor.fetchall()
+        ]
+
+        return {
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "user_id": user_id,
+            "opted_in": user.opted_in if user else None,
+            "exempt": user.exempt if user else None,
+            "leaderboard_visible": user.leaderboard_visible if user else None,
+            "created_at": str(user.created_at) if user and user.created_at else None,
+            "play_sessions": sessions,
+            "threshold_events": events,
+            "proactive_warnings": warnings,
+        }
+
+    def delete_all_user_data(self, user_id: int) -> dict:
+        """Permanently delete all data for a user. Returns counts of deleted rows."""
+        cursor = self.conn.cursor()
+
+        cursor.execute("DELETE FROM proactive_warnings WHERE user_id = ?", (user_id,))
+        warnings_deleted = cursor.rowcount
+
+        cursor.execute("DELETE FROM threshold_events WHERE user_id = ?", (user_id,))
+        events_deleted = cursor.rowcount
+
+        cursor.execute("DELETE FROM play_sessions WHERE user_id = ?", (user_id,))
+        sessions_deleted = cursor.rowcount
+
+        cursor.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+        self.conn.commit()
+
+        return {
+            "sessions_deleted": sessions_deleted,
+            "events_deleted": events_deleted,
+            "warnings_deleted": warnings_deleted,
+        }
 
     # ===== Play session operations =====
 
@@ -662,6 +767,7 @@ class Database:
             FROM play_sessions ps
             JOIN users u ON ps.user_id = u.user_id
             WHERE u.opted_in = 1
+              AND u.leaderboard_visible = 1
               AND ps.end_time IS NOT NULL
               AND ps.start_time >= ?
             GROUP BY ps.user_id
@@ -679,6 +785,7 @@ class Database:
             FROM play_sessions ps
             JOIN users u ON ps.user_id = u.user_id
             WHERE u.opted_in = 1
+              AND u.leaderboard_visible = 1
               AND ps.end_time IS NOT NULL
               AND ps.start_time >= ?
             GROUP BY ps.user_id
@@ -696,6 +803,7 @@ class Database:
             FROM play_sessions ps
             JOIN users u ON ps.user_id = u.user_id
             WHERE u.opted_in = 1
+              AND u.leaderboard_visible = 1
               AND ps.end_time IS NOT NULL
               AND ps.start_time >= ?
             GROUP BY ps.user_id

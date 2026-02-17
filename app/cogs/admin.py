@@ -3,6 +3,7 @@ Admin cog for Mjolnir.
 Provides commands for users to opt-in/out and admins to control the bot.
 """
 import io
+import json
 import discord
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -18,6 +19,82 @@ WINDOW_LABELS = {
     "weekly": "Calendar Week",
     "session": "Per Session",
 }
+
+
+def _build_privacy_embed(user) -> discord.Embed:
+    """Build the privacy settings embed for a user."""
+    embed = discord.Embed(title="Privacy Settings", color=discord.Color.blurple())
+    lb_status = "Visible" if user.leaderboard_visible else "Hidden"
+    embed.add_field(
+        name="Leaderboard Visibility",
+        value=(
+            f"**{lb_status}**\n"
+            "Controls whether you appear on `/leaderboard`."
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Changes take effect immediately.")
+    return embed
+
+
+class DeleteDataView(discord.ui.View):
+    """Confirmation view for /delete-my-data."""
+
+    def __init__(self, db, user_id: int):
+        super().__init__(timeout=60)
+        self.db = db
+        self.user_id = user_id
+
+    @discord.ui.button(label="Yes, delete everything", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        result = self.db.delete_all_user_data(self.user_id)
+        self.stop()
+        await interaction.response.edit_message(
+            content=(
+                "Your data has been permanently deleted.\n"
+                f"Removed **{result['sessions_deleted']}** sessions, "
+                f"**{result['events_deleted']}** threshold events, "
+                f"and **{result['warnings_deleted']}** warnings."
+            ),
+            view=None,
+        )
+        print(f"User {self.user_id} permanently deleted their data")
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(
+            content="Cancelled. Your data is safe.",
+            view=None,
+        )
+
+
+class PrivacyView(discord.ui.View):
+    """Interactive view for /privacy settings."""
+
+    def __init__(self, db, user_id: int, leaderboard_visible: bool):
+        super().__init__(timeout=60)
+        self.db = db
+        self.user_id = user_id
+        self._sync_button(leaderboard_visible)
+
+    def _sync_button(self, leaderboard_visible: bool):
+        if leaderboard_visible:
+            self.toggle_leaderboard.label = "Hide from leaderboard"
+            self.toggle_leaderboard.style = discord.ButtonStyle.secondary
+        else:
+            self.toggle_leaderboard.label = "Show on leaderboard"
+            self.toggle_leaderboard.style = discord.ButtonStyle.success
+
+    @discord.ui.button(label="placeholder", style=discord.ButtonStyle.secondary)
+    async def toggle_leaderboard(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user = self.db.get_user(self.user_id)
+        new_visible = not user.leaderboard_visible
+        self.db.set_leaderboard_visible(self.user_id, new_visible)
+        updated_user = self.db.get_user(self.user_id)
+        self._sync_button(new_visible)
+        embed = _build_privacy_embed(updated_user)
+        await interaction.response.edit_message(embed=embed, view=self)
 
 
 class Admin(commands.Cog):
@@ -82,6 +159,73 @@ class Admin(commands.Cog):
         )
 
         print(f"{interaction.user.name} opted out of tracking")
+
+    @app_commands.command(name="export", description="Export your data as JSON (GDPR compliance)")
+    async def export(self, interaction: discord.Interaction):
+        """Send the invoking user all their stored data as a JSON file."""
+        user = self.db.get_user(interaction.user.id)
+        if user is None:
+            await interaction.response.send_message(
+                "You have no data stored in this system.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        data = self.db.get_user_export_data(interaction.user.id)
+        json_bytes = json.dumps(data, indent=2).encode("utf-8")
+        buf = io.BytesIO(json_bytes)
+        buf.seek(0)
+
+        filename = f"mjolnir_export_{interaction.user.id}.json"
+        file = discord.File(buf, filename=filename)
+
+        await interaction.followup.send(
+            "Here's all the data Mjolnir has stored about you.\n"
+            "This includes your play sessions, threshold events, and account settings.",
+            file=file,
+            ephemeral=True,
+        )
+        print(f"{interaction.user.name} exported their data")
+
+    @app_commands.command(name="delete-my-data", description="Permanently remove all your tracking data")
+    async def delete_my_data(self, interaction: discord.Interaction):
+        """Let the invoking user permanently delete all their data."""
+        user = self.db.get_user(interaction.user.id)
+        if user is None:
+            await interaction.response.send_message(
+                "You have no data stored in this system.",
+                ephemeral=True,
+            )
+            return
+
+        view = DeleteDataView(self.db, interaction.user.id)
+        await interaction.response.send_message(
+            "**Are you sure you want to delete all your data?**\n\n"
+            "This will permanently remove:\n"
+            "- All your play sessions\n"
+            "- All threshold events and warnings\n"
+            "- Your account record\n\n"
+            "This action **cannot be undone**.",
+            view=view,
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="privacy", description="Manage your privacy settings")
+    async def privacy(self, interaction: discord.Interaction):
+        """View and toggle privacy controls for the invoking user."""
+        user = self.db.get_user(interaction.user.id)
+        if user is None:
+            await interaction.response.send_message(
+                "You have no data stored in this system. Use `/opt-in` first.",
+                ephemeral=True,
+            )
+            return
+
+        embed = _build_privacy_embed(user)
+        view = PrivacyView(self.db, interaction.user.id, user.leaderboard_visible)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     @app_commands.command(name="mystats", description="View your weekly playtime stats")
     async def mystats(self, interaction: discord.Interaction):
