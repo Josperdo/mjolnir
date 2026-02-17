@@ -197,10 +197,10 @@ Set `announcement_channel_id` in the settings table to a Discord channel ID. Whe
 - [x] Shame leaderboard / weekly recap posts in announcement channel
 
 **Historical Tracking & Analytics**
-- [ ] `/history` - View your playtime over time
-- [ ] Graph generation (weekly/monthly trends)
-- [ ] Compare current week to previous weeks
-- [ ] Identify patterns (e.g., "You play most on weekends")
+- [x] `/history` - View your playtime over time
+- [x] Graph generation (weekly/monthly trends)
+- [x] Compare current week to previous weeks
+- [x] Identify patterns (e.g., "You play most on weekends")
 
 **Data Management**
 - [ ] `/export` - Export your data as JSON (GDPR compliance)

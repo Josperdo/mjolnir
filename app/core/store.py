@@ -844,6 +844,77 @@ class Database:
             "busiest_day": busiest_day,
         }
 
+    # ===== Historical analytics queries =====
+
+    def get_weekly_history(self, user_id: int, weeks: int = 8) -> list[tuple[str, float]]:
+        """Get total playtime per calendar week for the last N weeks, oldest-first."""
+        cursor = self.conn.cursor()
+        now = datetime.now(timezone.utc)
+        this_monday = now - timedelta(
+            days=now.weekday(), hours=now.hour,
+            minutes=now.minute, seconds=now.second, microseconds=now.microsecond
+        )
+        result = []
+        for i in range(weeks - 1, -1, -1):
+            week_start = this_monday - timedelta(weeks=i)
+            week_end = week_start + timedelta(weeks=1)
+            cursor.execute("""
+                SELECT SUM(duration_seconds) as total
+                FROM play_sessions
+                WHERE user_id = ? AND start_time >= ? AND start_time < ?
+                  AND end_time IS NOT NULL
+            """, (user_id, week_start, week_end))
+            row = cursor.fetchone()
+            hours = (row["total"] or 0) / 3600
+            label = week_start.strftime("%m/%d")
+            result.append((label, hours))
+        return result
+
+    def get_monthly_history(self, user_id: int, months: int = 6) -> list[tuple[str, float]]:
+        """Get total playtime per calendar month for the last N months, oldest-first."""
+        cursor = self.conn.cursor()
+        now = datetime.now(timezone.utc)
+        result = []
+        for i in range(months - 1, -1, -1):
+            month_offset = now.month - 1 - i
+            year = now.year + month_offset // 12
+            month = month_offset % 12 + 1
+            month_start = datetime(year, month, 1, tzinfo=timezone.utc)
+            if month == 12:
+                month_end = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+            else:
+                month_end = datetime(year, month + 1, 1, tzinfo=timezone.utc)
+            cursor.execute("""
+                SELECT SUM(duration_seconds) as total
+                FROM play_sessions
+                WHERE user_id = ? AND start_time >= ? AND start_time < ?
+                  AND end_time IS NOT NULL
+            """, (user_id, month_start, month_end))
+            row = cursor.fetchone()
+            hours = (row["total"] or 0) / 3600
+            label = month_start.strftime("%b '%y")
+            result.append((label, hours))
+        return result
+
+    def get_dow_pattern(self, user_id: int, days: int = 30) -> dict[int, float]:
+        """Get total playtime per day of week (0=Mon..6=Sun) over the last N days."""
+        cursor = self.conn.cursor()
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        # SQLite strftime('%w'): 0=Sunday, 1=Monday, ..., 6=Saturday
+        cursor.execute("""
+            SELECT strftime('%w', start_time) as dow, SUM(duration_seconds) as total
+            FROM play_sessions
+            WHERE user_id = ? AND start_time >= ? AND end_time IS NOT NULL
+            GROUP BY dow
+        """, (user_id, cutoff))
+        # Map SQLite dow (0=Sun..6=Sat) to Python weekday (0=Mon..6=Sun)
+        sqlite_to_python = {0: 6, 1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
+        result = {i: 0.0 for i in range(7)}
+        for row in cursor.fetchall():
+            python_dow = sqlite_to_python[int(row["dow"])]
+            result[python_dow] = (row["total"] or 0) / 3600
+        return result
+
     def close(self):
         """Close database connection."""
         self.conn.close()

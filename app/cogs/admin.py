@@ -2,6 +2,7 @@
 Admin cog for Mjolnir.
 Provides commands for users to opt-in/out and admins to control the bot.
 """
+import io
 import discord
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -290,6 +291,168 @@ class Admin(commands.Cog):
             embed.add_field(name="Most Frequent Player", value="\n".join(lines), inline=False)
 
         await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="history", description="View your playtime history and trends")
+    @app_commands.describe(
+        period="Time period to analyze (default: weekly)",
+        graph="Generate a visual chart image (requires matplotlib)",
+    )
+    @app_commands.choices(
+        period=[
+            app_commands.Choice(name="Weekly (last 8 weeks)", value="weekly"),
+            app_commands.Choice(name="Monthly (last 6 months)", value="monthly"),
+        ],
+    )
+    async def history(
+        self,
+        interaction: discord.Interaction,
+        period: str = "weekly",
+        graph: bool = False,
+    ):
+        """Show playtime history, trends, and day-of-week patterns."""
+        user = self.db.get_user(interaction.user.id)
+        if user is None or not user.opted_in:
+            await interaction.response.send_message(
+                "You're not opted in to playtime tracking.\nUse `/opt-in` to start!",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        DOW_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+        if period == "weekly":
+            history_data = self.db.get_weekly_history(interaction.user.id, weeks=8)
+            chart_title = "Weekly Playtime (Last 8 Weeks)"
+            period_label = "Week"
+        else:
+            history_data = self.db.get_monthly_history(interaction.user.id, months=6)
+            chart_title = "Monthly Playtime (Last 6 Months)"
+            period_label = "Month"
+
+        dow_data = self.db.get_dow_pattern(interaction.user.id, days=30)
+
+        embed = discord.Embed(title="Playtime History", color=discord.Color.blue())
+
+        # Text bar chart
+        max_h = max((h for _, h in history_data), default=0.0) or 1.0
+        bar_len = 15
+        chart_lines = []
+        for label, hours in history_data:
+            filled = min(int((hours / max_h) * bar_len), bar_len)
+            bar = "\u2588" * filled + "\u2591" * (bar_len - filled)
+            chart_lines.append(f"`{label}` {bar} **{hours:.1f}h**")
+        embed.add_field(
+            name=chart_title,
+            value="\n".join(chart_lines) if chart_lines else "No data yet.",
+            inline=False,
+        )
+
+        # Current vs previous period comparison
+        if len(history_data) >= 2:
+            current_h = history_data[-1][1]
+            prev_h = history_data[-2][1]
+            diff = current_h - prev_h
+            if diff > 0:
+                arrow, change_str = "▲", f"+{diff:.1f}h"
+            elif diff < 0:
+                arrow, change_str = "▼", f"-{abs(diff):.1f}h"
+            else:
+                arrow, change_str = "→", "no change"
+            embed.add_field(
+                name=f"This {period_label} vs Last {period_label}",
+                value=(
+                    f"Current: **{current_h:.1f}h**\n"
+                    f"Previous: **{prev_h:.1f}h**\n"
+                    f"Change: {arrow} **{change_str}**"
+                ),
+                inline=True,
+            )
+
+        # Day-of-week pattern
+        if any(v > 0 for v in dow_data.values()):
+            max_dow_h = max(dow_data.values()) or 1.0
+            dow_lines = []
+            for i, name in enumerate(DOW_NAMES):
+                hours = dow_data.get(i, 0.0)
+                filled = min(int((hours / max_dow_h) * 10), 10)
+                bar = "\u2588" * filled + "\u2591" * (10 - filled)
+                dow_lines.append(f"`{name}` {bar} {hours:.1f}h")
+            embed.add_field(
+                name="Day-of-Week Pattern (Last 30 Days)",
+                value="\n".join(dow_lines),
+                inline=False,
+            )
+            busiest = max(dow_data, key=dow_data.get)
+            embed.add_field(
+                name="Pattern Insight",
+                value=f"You play most on **{DOW_NAMES[busiest]}s**.",
+                inline=True,
+            )
+
+        if not graph:
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        # Generate chart image
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            import matplotlib.patches as mpatches
+
+            labels = [lbl for lbl, _ in history_data]
+            hours_vals = [h for _, h in history_data]
+            dow_hours = [dow_data.get(i, 0.0) for i in range(7)]
+
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+            fig.set_facecolor("#2C2F33")
+
+            # History bar chart
+            ax1.bar(labels, hours_vals, color="#5865F2", width=0.6, edgecolor="#FFFFFF22")
+            ax1.set_title(chart_title, color="white", fontsize=10, pad=8)
+            ax1.set_ylabel("Hours", color="#B9BBBE")
+            ax1.tick_params(colors="#B9BBBE")
+            ax1.set_facecolor("#36393F")
+            for spine in ax1.spines.values():
+                spine.set_edgecolor("#4F545C")
+            ax1.yaxis.grid(True, color="#4F545C", linestyle="--", alpha=0.5)
+            ax1.set_axisbelow(True)
+            plt.setp(ax1.get_xticklabels(), rotation=30, ha="right", fontsize=8, color="#B9BBBE")
+
+            # Day-of-week chart
+            weekend_colors = ["#FEE75C" if i >= 5 else "#5865F2" for i in range(7)]
+            ax2.bar(DOW_NAMES, dow_hours, color=weekend_colors, width=0.6, edgecolor="#FFFFFF22")
+            ax2.set_title("Day-of-Week Pattern (30 Days)", color="white", fontsize=10, pad=8)
+            ax2.set_ylabel("Hours", color="#B9BBBE")
+            ax2.tick_params(colors="#B9BBBE")
+            ax2.set_facecolor("#36393F")
+            for spine in ax2.spines.values():
+                spine.set_edgecolor("#4F545C")
+            ax2.yaxis.grid(True, color="#4F545C", linestyle="--", alpha=0.5)
+            ax2.set_axisbelow(True)
+            plt.setp(ax2.get_xticklabels(), color="#B9BBBE")
+            weekday_patch = mpatches.Patch(color="#5865F2", label="Weekday")
+            weekend_patch = mpatches.Patch(color="#FEE75C", label="Weekend")
+            ax2.legend(
+                handles=[weekday_patch, weekend_patch],
+                facecolor="#2C2F33", labelcolor="white", framealpha=0.8,
+            )
+
+            plt.tight_layout(pad=2.0)
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png", dpi=120, facecolor="#2C2F33")
+            buf.seek(0)
+            plt.close(fig)
+
+            file = discord.File(buf, filename="history.png")
+            embed.set_image(url="attachment://history.png")
+            await interaction.followup.send(embed=embed, file=file, ephemeral=True)
+
+        except ImportError:
+            embed.set_footer(text="Install matplotlib to enable graph generation: pip install matplotlib")
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ===== Admin Commands =====
 
@@ -819,7 +982,7 @@ class Admin(commands.Cog):
         self, interaction: discord.Interaction, count: Optional[int] = 10
     ):
         """Display recent audit log entries."""
-        entries = self.db.get_audit_log(limit=min(count, 25))
+        entries = self.db.get_audit_log(limit=min(count or 10, 25))
 
         if not entries:
             await interaction.response.send_message(
