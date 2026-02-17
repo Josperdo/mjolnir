@@ -32,8 +32,8 @@ Mjolnir is a Discord bot that tracks playtime for a target game (default: *Leagu
 
 ```bash
 # Clone the repository
-git clone https://github.com/Josperdo/Mjolnir.git
-cd Mjolnir
+git clone https://github.com/Josperdo/mjolnir.git
+cd mjolnir
 
 # Create virtual environment
 python -m venv .venv
