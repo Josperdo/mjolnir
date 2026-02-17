@@ -305,6 +305,12 @@ class Admin(commands.Cog):
         parent=hammer,
     )
 
+    roasts = app_commands.Group(
+        name="roasts",
+        description="Manage custom roast messages",
+        parent=hammer,
+    )
+
     @hammer.command(name="on", description="Enable playtime tracking")
     async def hammer_on(self, interaction: discord.Interaction):
         """Enable playtime tracking."""
@@ -579,6 +585,128 @@ class Admin(commands.Cog):
                 ephemeral=True
             )
 
+
+    # ----- /hammer roasts list -----
+
+    @roasts.command(name="list", description="View all custom roast messages")
+    async def roasts_list(self, interaction: discord.Interaction):
+        """Display custom roast messages or indicate defaults are in use."""
+        all_roasts = self.db.get_custom_roasts()
+
+        if not all_roasts:
+            await interaction.response.send_message(
+                "No custom roasts configured — using default roast messages.\n"
+                "Use `/hammer roasts add` to add your own!",
+                ephemeral=True
+            )
+            return
+
+        embed = discord.Embed(title="Custom Roast Messages", color=discord.Color.orange())
+
+        warn_roasts = [r for r in all_roasts if r.action == "warn"]
+        timeout_roasts = [r for r in all_roasts if r.action == "timeout"]
+
+        if warn_roasts:
+            lines = [f"`#{r.id}` — {r.message}" for r in warn_roasts]
+            embed.add_field(name="Warning Roasts", value="\n".join(lines), inline=False)
+
+        if timeout_roasts:
+            lines = [f"`#{r.id}` — {r.message}" for r in timeout_roasts]
+            embed.add_field(name="Timeout Roasts", value="\n".join(lines), inline=False)
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ----- /hammer roasts add -----
+
+    @roasts.command(name="add", description="Add a custom roast message")
+    @app_commands.describe(
+        action="When to use this roast (warn or timeout)",
+        message="The roast message text",
+    )
+    @app_commands.choices(
+        action=[
+            app_commands.Choice(name="warn", value="warn"),
+            app_commands.Choice(name="timeout", value="timeout"),
+        ],
+    )
+    async def roasts_add(
+        self, interaction: discord.Interaction, action: str, message: str
+    ):
+        """Add a custom roast message."""
+        message = message.strip()
+        if not message:
+            await interaction.response.send_message(
+                "Roast message cannot be empty.", ephemeral=True
+            )
+            return
+
+        roast = self.db.add_custom_roast(action=action, message=message)
+        await interaction.response.send_message(
+            f"Roast `#{roast.id}` added for **{action}**:\n{message}",
+            ephemeral=True
+        )
+        print(f"Custom roast #{roast.id} added by admin")
+
+    # ----- /hammer roasts remove -----
+
+    @roasts.command(name="remove", description="Remove a custom roast by ID")
+    @app_commands.describe(roast_id="The roast ID to remove (shown in roasts list)")
+    async def roasts_remove(self, interaction: discord.Interaction, roast_id: int):
+        """Delete a custom roast message."""
+        deleted = self.db.delete_custom_roast(roast_id)
+
+        if deleted:
+            await interaction.response.send_message(
+                f"Roast `#{roast_id}` has been removed.",
+                ephemeral=True
+            )
+            print(f"Custom roast #{roast_id} removed by admin")
+        else:
+            await interaction.response.send_message(
+                f"No roast found with ID `#{roast_id}`.",
+                ephemeral=True
+            )
+
+    # ----- /hammer setschedule -----
+
+    DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+    @hammer.command(
+        name="setschedule",
+        description="Set the day and hour for weekly recap posts"
+    )
+    @app_commands.describe(
+        day="Day of the week for weekly recap",
+        hour="Hour in UTC (0-23) for weekly recap",
+    )
+    @app_commands.choices(
+        day=[
+            app_commands.Choice(name="Monday", value=0),
+            app_commands.Choice(name="Tuesday", value=1),
+            app_commands.Choice(name="Wednesday", value=2),
+            app_commands.Choice(name="Thursday", value=3),
+            app_commands.Choice(name="Friday", value=4),
+            app_commands.Choice(name="Saturday", value=5),
+            app_commands.Choice(name="Sunday", value=6),
+        ],
+    )
+    async def hammer_setschedule(
+        self, interaction: discord.Interaction, day: int, hour: int
+    ):
+        """Set the weekly recap schedule."""
+        if hour < 0 or hour > 23:
+            await interaction.response.send_message(
+                "Hour must be between 0 and 23.", ephemeral=True
+            )
+            return
+
+        self.db.update_settings(weekly_recap_day=day, weekly_recap_hour=hour)
+        day_name = self.DAY_NAMES[day]
+        await interaction.response.send_message(
+            f"Weekly recap set to **{day_name}** at **{hour:02d}:00 UTC**.",
+            ephemeral=True
+        )
+        print(f"Weekly recap schedule set to {day_name} {hour:02d}:00 UTC by admin")
 
     # ===== Manual Override Commands =====
 

@@ -5,7 +5,7 @@ Monitors user presence and tracks playtime for the target game.
 from datetime import datetime, timedelta, timezone
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from app.core.models import PlaySession, ThresholdRule
 from app.core.rules import evaluate_rules, get_highest_action, get_roast
@@ -18,6 +18,14 @@ class Watcher(commands.Cog):
         """Initialize the watcher cog."""
         self.bot = bot
         self.db = bot.db
+
+    async def cog_load(self):
+        """Start background tasks when cog is loaded."""
+        self.weekly_recap_loop.start()
+
+    def cog_unload(self):
+        """Clean up when cog is unloaded."""
+        self.weekly_recap_loop.cancel()
 
     @commands.Cog.listener()
     async def on_presence_update(self, before: discord.Member, after: discord.Member):
@@ -244,7 +252,8 @@ class Watcher(commands.Cog):
     async def _apply_timeout(self, member: discord.Member, rule: ThresholdRule):
         """Apply a timeout and post a public roast (or DM as fallback)."""
         timeout_duration = timedelta(hours=rule.duration_hours)
-        roast = get_roast("timeout")
+        custom_roasts = self.db.get_custom_roasts()
+        roast = get_roast("timeout", custom_roasts)
 
         try:
             await member.timeout(
@@ -288,7 +297,8 @@ class Watcher(commands.Cog):
 
     async def _send_warning(self, member: discord.Member, rule: ThresholdRule):
         """Post a public warning roast (or DM as fallback)."""
-        roast = get_roast("warn")
+        custom_roasts = self.db.get_custom_roasts()
+        roast = get_roast("warn", custom_roasts)
 
         embed = discord.Embed(
             title="Playtime Warning",
@@ -343,6 +353,115 @@ class Watcher(commands.Cog):
                   f"{playtime:.1f}h / {rule.hours}h {rule.window_type}")
         except discord.Forbidden:
             print(f"Could not DM proactive warning to {member.name}")
+
+
+    # ===== Weekly Recap =====
+
+    @tasks.loop(minutes=30)
+    async def weekly_recap_loop(self):
+        """Check if it's time to send the weekly recap."""
+        settings = self.db.get_settings()
+        now = datetime.now(timezone.utc)
+
+        # Check if current day/hour matches schedule
+        if now.weekday() != settings.weekly_recap_day:
+            return
+        if now.hour != settings.weekly_recap_hour:
+            return
+
+        # Dedup: don't send if already sent this week
+        if settings.last_weekly_recap_at:
+            days_since = (now - settings.last_weekly_recap_at).total_seconds() / 86400
+            if days_since < 1:
+                return  # Already sent within last 24 hours
+
+        await self._send_weekly_summary_dms()
+        await self._send_shame_leaderboard()
+
+        self.db.update_settings(last_weekly_recap_at=now)
+        print(f"Weekly recap sent at {now.strftime('%Y-%m-%d %H:%M UTC')}")
+
+    @weekly_recap_loop.before_loop
+    async def before_weekly_recap(self):
+        """Wait for the bot to be ready before starting the loop."""
+        await self.bot.wait_until_ready()
+
+    async def _send_weekly_summary_dms(self):
+        """Send a weekly summary DM to each opted-in user."""
+        user_ids = self.db.get_opted_in_users()
+
+        for user_id in user_ids:
+            summary = self.db.get_weekly_summary(user_id)
+            if summary["session_count"] == 0:
+                continue  # No sessions last week, skip
+
+            embed = discord.Embed(
+                title="Your Weekly Recap",
+                color=discord.Color.blue(),
+            )
+            embed.add_field(
+                name="Total Playtime",
+                value=f"**{summary['total_hours']:.1f}h**",
+                inline=True,
+            )
+            embed.add_field(
+                name="Sessions",
+                value=f"**{summary['session_count']}**",
+                inline=True,
+            )
+            embed.add_field(
+                name="Longest Session",
+                value=f"**{summary['longest_session_hours']:.1f}h**",
+                inline=True,
+            )
+            if summary["busiest_day"]:
+                embed.add_field(
+                    name="Busiest Day",
+                    value=f"**{summary['busiest_day']}**",
+                    inline=True,
+                )
+
+            # Try to find the member in any guild and DM them
+            member = None
+            for guild in self.bot.guilds:
+                member = guild.get_member(user_id)
+                if member:
+                    break
+
+            if not member:
+                continue
+
+            try:
+                await member.send(embed=embed)
+            except discord.Forbidden:
+                pass  # User has DMs disabled
+
+    async def _send_shame_leaderboard(self):
+        """Post a weekly shame leaderboard to the announcement channel."""
+        channel = self._get_announcement_channel()
+        if not channel:
+            return
+
+        most_hours = self.db.get_leaderboard_most_hours()
+        if not most_hours:
+            return
+
+        embed = discord.Embed(
+            title="Weekly Shame Board",
+            description="Last week's biggest offenders:",
+            color=discord.Color.dark_red(),
+        )
+
+        lines = [
+            f"{i+1}. <@{uid}> — {hours:.1f}h"
+            for i, (uid, hours) in enumerate(most_hours)
+        ]
+        embed.add_field(name="Most Hours Played", value="\n".join(lines), inline=False)
+
+        try:
+            await channel.send(embed=embed)
+        except (discord.Forbidden, discord.HTTPException):
+            print("Failed to post weekly shame leaderboard")
 
 
 async def setup(bot):

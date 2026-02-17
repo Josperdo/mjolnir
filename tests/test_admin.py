@@ -6,7 +6,7 @@ import discord
 import pytest
 
 from app.cogs.admin import Admin
-from app.core.models import AuditLog, BotSettings, PlaySession, ThresholdRule, User
+from app.core.models import AuditLog, BotSettings, CustomRoast, PlaySession, ThresholdRule, User
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -728,3 +728,116 @@ async def test_mystats_zero_stats(cog, db, interaction):
         (f for f in embed.fields if "Warnings & Timeouts" in f.name), None
     )
     assert wt_field is not None
+
+
+# ---------------------------------------------------------------------------
+# Tests: /hammer roasts
+# ---------------------------------------------------------------------------
+
+
+async def test_roasts_list_shows_custom(cog, db, interaction):
+    """Roasts list shows custom roasts grouped by action."""
+    db.get_custom_roasts.return_value = [
+        CustomRoast(id=1, action="warn", message="You suck at this game"),
+        CustomRoast(id=2, action="timeout", message="Get out lol"),
+    ]
+
+    await cog.roasts_list.callback(cog, interaction)
+
+    embed = interaction.response.send_message.call_args[1]["embed"]
+    assert "Custom Roast" in embed.title
+    assert len(embed.fields) == 2
+    assert "You suck" in embed.fields[0].value
+    assert "Get out" in embed.fields[1].value
+
+
+async def test_roasts_list_empty_shows_defaults(cog, db, interaction):
+    """Roasts list with no custom roasts shows default message."""
+    db.get_custom_roasts.return_value = []
+
+    await cog.roasts_list.callback(cog, interaction)
+
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "default" in msg.lower()
+
+
+async def test_roasts_add_warn(cog, db, interaction):
+    """Adding a warn roast calls add_custom_roast correctly."""
+    db.add_custom_roast.return_value = CustomRoast(
+        id=1, action="warn", message="Touch grass"
+    )
+
+    await cog.roasts_add.callback(cog, interaction, action="warn", message="Touch grass")
+
+    db.add_custom_roast.assert_called_once_with(action="warn", message="Touch grass")
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "#1" in msg
+    assert "Touch grass" in msg
+
+
+async def test_roasts_add_timeout(cog, db, interaction):
+    """Adding a timeout roast stores correctly."""
+    db.add_custom_roast.return_value = CustomRoast(
+        id=2, action="timeout", message="Begone"
+    )
+
+    await cog.roasts_add.callback(cog, interaction, action="timeout", message="Begone")
+
+    db.add_custom_roast.assert_called_once_with(action="timeout", message="Begone")
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "timeout" in msg
+
+
+async def test_roasts_add_empty_rejected(cog, db, interaction):
+    """Empty roast message is rejected."""
+    await cog.roasts_add.callback(cog, interaction, action="warn", message="   ")
+
+    db.add_custom_roast.assert_not_called()
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "cannot be empty" in msg.lower()
+
+
+async def test_roasts_remove_success(cog, db, interaction):
+    """Removing an existing roast returns confirmation."""
+    db.delete_custom_roast.return_value = True
+
+    await cog.roasts_remove.callback(cog, interaction, roast_id=1)
+
+    db.delete_custom_roast.assert_called_once_with(1)
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "#1" in msg
+    assert "removed" in msg.lower()
+
+
+async def test_roasts_remove_not_found(cog, db, interaction):
+    """Removing a non-existent roast returns not-found message."""
+    db.delete_custom_roast.return_value = False
+
+    await cog.roasts_remove.callback(cog, interaction, roast_id=999)
+
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "no roast found" in msg.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests: /hammer setschedule
+# ---------------------------------------------------------------------------
+
+
+async def test_setschedule_saves_settings(cog, db, interaction):
+    """setschedule stores day and hour in settings."""
+    await cog.hammer_setschedule.callback(cog, interaction, day=6, hour=18)
+
+    db.update_settings.assert_called_once_with(weekly_recap_day=6, weekly_recap_hour=18)
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "Sunday" in msg
+    assert "18:00 UTC" in msg
+
+
+async def test_setschedule_invalid_hour(cog, db, interaction):
+    """setschedule rejects invalid hour."""
+    await cog.hammer_setschedule.callback(cog, interaction, day=0, hour=25)
+
+    db.update_settings.assert_not_called()
+    msg = interaction.response.send_message.call_args[0][0]
+    assert "between 0 and 23" in msg.lower()

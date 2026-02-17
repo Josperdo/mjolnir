@@ -55,6 +55,9 @@ class BotSettings:
     announcement_channel_id: Optional[int] = None
     warning_threshold_pct: float = 0.9
     cooldown_days: int = 3
+    weekly_recap_day: int = 0  # 0=Monday, 6=Sunday
+    weekly_recap_hour: int = 9  # UTC hour (0-23)
+    last_weekly_recap_at: Optional[datetime] = None
 
 
 @dataclass
@@ -95,3 +98,11 @@ class AuditLog:
     def __post_init__(self):
         if self.created_at is None:
             self.created_at = datetime.now(timezone.utc)
+
+
+@dataclass
+class CustomRoast:
+    """A custom roast message configured by admins."""
+    id: Optional[int] = None
+    action: str = "warn"  # 'warn' or 'timeout'
+    message: str = ""

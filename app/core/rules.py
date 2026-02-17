@@ -77,8 +77,16 @@ def get_highest_action(rules: List[ThresholdRule]) -> Optional[ThresholdRule]:
     return max(rules, key=lambda r: r.hours)
 
 
-def get_roast(action: str) -> str:
-    """Return a random roast message for the given action type."""
+def get_roast(action: str, custom_roasts: list | None = None) -> str:
+    """Return a random roast message for the given action type.
+
+    If custom_roasts are provided and contain messages for the action,
+    those are used instead of the hardcoded defaults.
+    """
+    if custom_roasts:
+        pool = [r.message for r in custom_roasts if r.action == action]
+        if pool:
+            return random.choice(pool)
     if action == "timeout":
         return random.choice(ROAST_MESSAGES_TIMEOUT)
     return random.choice(ROAST_MESSAGES_WARN)

@@ -52,6 +52,7 @@ def db():
     mock.has_threshold_been_triggered.return_value = False
     mock.get_last_threshold_event_time.return_value = None
     mock.has_proactive_warning_been_sent.return_value = False
+    mock.get_custom_roasts.return_value = []
     return mock
 
 
@@ -371,3 +372,98 @@ async def test_proactive_warning_disabled_when_pct_zero(cog, db, member):
 
     member.send.assert_not_called()
     db.record_proactive_warning.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tests: weekly recap loop
+# ---------------------------------------------------------------------------
+
+
+async def test_weekly_recap_skips_wrong_day(cog, db):
+    """Loop returns early when current day doesn't match schedule."""
+    db.get_settings.return_value = BotSettings(
+        tracking_enabled=True,
+        target_game="League of Legends",
+        weekly_recap_day=0,  # Monday
+        weekly_recap_hour=9,
+    )
+
+    # Patch datetime to be a Tuesday
+    with patch("app.cogs.watcher.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 2, 17, 9, 0, tzinfo=timezone.utc)  # Tuesday
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+        await cog.weekly_recap_loop()
+
+    db.get_opted_in_users.assert_not_called()
+    db.get_leaderboard_most_hours.assert_not_called()
+
+
+async def test_weekly_recap_skips_wrong_hour(cog, db):
+    """Loop returns early when current hour doesn't match schedule."""
+    db.get_settings.return_value = BotSettings(
+        tracking_enabled=True,
+        target_game="League of Legends",
+        weekly_recap_day=0,  # Monday
+        weekly_recap_hour=9,
+    )
+
+    with patch("app.cogs.watcher.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 2, 16, 15, 0, tzinfo=timezone.utc)  # Monday but 15:00
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+        await cog.weekly_recap_loop()
+
+    db.get_opted_in_users.assert_not_called()
+
+
+async def test_weekly_summary_dm_sent(cog, db):
+    """Weekly summary DMs are sent to opted-in users with sessions."""
+    db.get_opted_in_users.return_value = [111, 222]
+    db.get_weekly_summary.side_effect = lambda uid: {
+        "total_hours": 12.5 if uid == 111 else 0.0,
+        "session_count": 5 if uid == 111 else 0,
+        "longest_session_hours": 3.0 if uid == 111 else 0.0,
+        "busiest_day": "Sat" if uid == 111 else None,
+    }
+
+    member1 = MagicMock(spec=discord.Member)
+    member1.send = AsyncMock()
+
+    guild = MagicMock()
+    guild.get_member.side_effect = lambda uid: member1 if uid == 111 else None
+    cog.bot.guilds = [guild]
+
+    await cog._send_weekly_summary_dms()
+
+    # User 111 had sessions, should get DM
+    member1.send.assert_called_once()
+    embed = member1.send.call_args[1]["embed"]
+    assert "12.5" in embed.fields[0].value
+
+
+async def test_shame_leaderboard_posted(cog, db):
+    """Shame leaderboard is posted to announcement channel."""
+    db.get_settings.return_value = SETTINGS_WITH_CHANNEL
+    db.get_leaderboard_most_hours.return_value = [(111, 15.0), (222, 10.0)]
+
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    cog.bot.get_channel.return_value = channel
+
+    await cog._send_shame_leaderboard()
+
+    channel.send.assert_called_once()
+    embed = channel.send.call_args[1]["embed"]
+    assert "Shame" in embed.title
+    assert "15.0" in embed.fields[0].value
+
+
+async def test_shame_leaderboard_skips_no_channel(cog, db):
+    """Shame leaderboard does nothing when no announcement channel is set."""
+    db.get_settings.return_value = DEFAULT_SETTINGS  # No channel
+    cog.bot.get_channel.return_value = None
+
+    await cog._send_shame_leaderboard()
+
+    db.get_leaderboard_most_hours.assert_not_called()

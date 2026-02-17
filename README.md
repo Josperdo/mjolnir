@@ -87,6 +87,8 @@ pytest tests/ -v
 - `/hammer on` - Enable playtime tracking globally
 - `/hammer off` - Disable playtime tracking globally
 - `/hammer status` - View bot status, threshold rules, and announcement channel config
+- `/hammer roasts list|add|remove` - Manage custom roast messages (overrides defaults)
+- `/hammer setschedule <day> <hour>` - Configure weekly recap schedule (DMs + shame board)
 
 ---
 
@@ -190,10 +192,9 @@ Set `announcement_channel_id` in the settings table to a Discord channel ID. Whe
   - [x] Most frequent player
 
 **Enhanced Notifications**
-- [ ] Admin-customizable roast messages (move from hardcoded to DB table)
-- [ ] Weekly summary DMs
-- [ ] Timeout expiration notifications
-- [ ] Shame leaderboard / weekly recap posts in announcement channel
+- [x] Admin-customizable roast messages (move from hardcoded to DB table)
+- [x] Weekly summary DMs
+- [x] Shame leaderboard / weekly recap posts in announcement channel
 
 **Historical Tracking & Analytics**
 - [ ] `/history` - View your playtime over time
@@ -231,7 +232,7 @@ Set `announcement_channel_id` in the settings table to a Discord channel ID. Whe
 
 - **Phase 1** — Complete
 - **Phase 2** — In Testing
-- **Phase 3** — In Progress (leaderboard + mystats enhancements done)
+- **Phase 3** — In Progress (leaderboard, mystats enhancements, custom roasts, weekly recaps done)
 
 ---
 

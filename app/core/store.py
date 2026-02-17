@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from .models import AuditLog, BotSettings, PlaySession, ThresholdEvent, ThresholdRule, User
+from .models import AuditLog, BotSettings, CustomRoast, PlaySession, ThresholdEvent, ThresholdRule, User
 
 
 class Database:
@@ -132,6 +132,15 @@ class Database:
             ON proactive_warnings(user_id, rule_id, warned_at)
         """)
 
+        # Custom roast messages table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS custom_roasts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action TEXT NOT NULL,
+                message TEXT NOT NULL
+            )
+        """)
+
         # Seed default threshold rules if table is empty
         cursor.execute("SELECT COUNT(*) as cnt FROM threshold_rules")
         if cursor.fetchone()["cnt"] == 0:
@@ -160,6 +169,9 @@ class Database:
             ("users", "exempt", "INTEGER NOT NULL DEFAULT 0"),
             ("settings", "warning_threshold_pct", "REAL NOT NULL DEFAULT 0.9"),
             ("settings", "cooldown_days", "INTEGER NOT NULL DEFAULT 3"),
+            ("settings", "weekly_recap_day", "INTEGER NOT NULL DEFAULT 0"),
+            ("settings", "weekly_recap_hour", "INTEGER NOT NULL DEFAULT 9"),
+            ("settings", "last_weekly_recap_at", "TIMESTAMP"),
         ]
         for table, column, col_type in migrations:
             try:
@@ -517,6 +529,9 @@ class Database:
             announcement_channel_id=row["announcement_channel_id"],
             warning_threshold_pct=row["warning_threshold_pct"],
             cooldown_days=row["cooldown_days"],
+            weekly_recap_day=row["weekly_recap_day"],
+            weekly_recap_hour=row["weekly_recap_hour"],
+            last_weekly_recap_at=row["last_weekly_recap_at"],
         )
 
     def update_settings(self, **kwargs):
@@ -525,6 +540,7 @@ class Database:
             "tracking_enabled", "target_game", "weekly_threshold_hours",
             "timeout_duration_hours", "announcement_channel_id",
             "warning_threshold_pct", "cooldown_days",
+            "weekly_recap_day", "weekly_recap_hour", "last_weekly_recap_at",
         }
 
         updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
@@ -742,6 +758,91 @@ class Database:
             if row["action"] in result:
                 result[row["action"]] = row["cnt"]
         return result
+
+    # ===== Custom roast operations =====
+
+    def get_custom_roasts(self, action: Optional[str] = None) -> List[CustomRoast]:
+        """Get custom roast messages, optionally filtered by action type."""
+        cursor = self.conn.cursor()
+        if action:
+            cursor.execute(
+                "SELECT * FROM custom_roasts WHERE action = ? ORDER BY id", (action,)
+            )
+        else:
+            cursor.execute("SELECT * FROM custom_roasts ORDER BY id")
+        return [
+            CustomRoast(id=row["id"], action=row["action"], message=row["message"])
+            for row in cursor.fetchall()
+        ]
+
+    def add_custom_roast(self, action: str, message: str) -> CustomRoast:
+        """Add a custom roast message."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "INSERT INTO custom_roasts (action, message) VALUES (?, ?)",
+            (action, message)
+        )
+        self.conn.commit()
+        return CustomRoast(id=cursor.lastrowid, action=action, message=message)
+
+    def delete_custom_roast(self, roast_id: int) -> bool:
+        """Delete a custom roast by ID. Returns True if a row was deleted."""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM custom_roasts WHERE id = ?", (roast_id,))
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    # ===== Weekly summary queries =====
+
+    def get_weekly_summary(self, user_id: int) -> dict:
+        """Get playtime summary for the previous calendar week (Mon-Sun)."""
+        now = datetime.now(timezone.utc)
+        # Previous week: go back to last Monday, then the Monday before that
+        days_since_monday = now.weekday()
+        this_monday = now - timedelta(
+            days=days_since_monday, hours=now.hour,
+            minutes=now.minute, seconds=now.second,
+            microseconds=now.microsecond
+        )
+        last_monday = this_monday - timedelta(days=7)
+
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT SUM(duration_seconds) as total,
+                   COUNT(*) as cnt,
+                   MAX(duration_seconds) as longest
+            FROM play_sessions
+            WHERE user_id = ?
+              AND start_time >= ? AND start_time < ?
+              AND end_time IS NOT NULL
+        """, (user_id, last_monday, this_monday))
+        row = cursor.fetchone()
+
+        total_hours = (row["total"] or 0) / 3600
+        session_count = row["cnt"] or 0
+        longest_hours = (row["longest"] or 0) / 3600
+
+        # Find busiest day
+        cursor.execute("""
+            SELECT strftime('%w', start_time) as dow, SUM(duration_seconds) as total
+            FROM play_sessions
+            WHERE user_id = ?
+              AND start_time >= ? AND start_time < ?
+              AND end_time IS NOT NULL
+            GROUP BY dow
+            ORDER BY total DESC
+            LIMIT 1
+        """, (user_id, last_monday, this_monday))
+        busiest_row = cursor.fetchone()
+        day_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        busiest_day = day_names[int(busiest_row["dow"])] if busiest_row else None
+
+        return {
+            "total_hours": total_hours,
+            "session_count": session_count,
+            "longest_session_hours": longest_hours,
+            "busiest_day": busiest_day,
+        }
 
     def close(self):
         """Close database connection."""

@@ -1,7 +1,7 @@
 """Tests for rule evaluation logic and roast messages."""
 import pytest
 
-from app.core.models import ThresholdRule
+from app.core.models import CustomRoast, ThresholdRule
 from app.core.rules import (
     ROAST_MESSAGES_TIMEOUT,
     ROAST_MESSAGES_WARN,
@@ -144,3 +144,35 @@ def test_get_roast_unknown_defaults_to_warn():
     """Unknown action type falls back to warn pool."""
     result = get_roast("unknown")
     assert result in ROAST_MESSAGES_WARN
+
+
+def test_get_roast_uses_custom_when_provided():
+    """Custom roasts override defaults when provided."""
+    custom = [
+        CustomRoast(id=1, action="warn", message="Custom warn roast"),
+        CustomRoast(id=2, action="timeout", message="Custom timeout roast"),
+    ]
+    result = get_roast("warn", custom)
+    assert result == "Custom warn roast"
+
+    result = get_roast("timeout", custom)
+    assert result == "Custom timeout roast"
+
+
+def test_get_roast_falls_back_to_defaults():
+    """Empty custom list falls back to hardcoded defaults."""
+    result = get_roast("warn", [])
+    assert result in ROAST_MESSAGES_WARN
+
+    result = get_roast("timeout", [])
+    assert result in ROAST_MESSAGES_TIMEOUT
+
+
+def test_get_roast_custom_partial_action():
+    """Custom roasts only for one action, other falls back to defaults."""
+    custom = [CustomRoast(id=1, action="timeout", message="Only timeout custom")]
+    result = get_roast("warn", custom)
+    assert result in ROAST_MESSAGES_WARN
+
+    result = get_roast("timeout", custom)
+    assert result == "Only timeout custom"
