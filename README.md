@@ -208,10 +208,10 @@ Set `announcement_channel_id` in the settings table to a Discord channel ID. Whe
 - [x] Privacy controls per user
 
 **Multi-Game Support**
-- [ ] Track multiple games with separate limits
-- [ ] Game groups: Limit "competitive games" combined (LoL + Valorant + CS2)
-- [ ] Per-game opt-in: Choose which games to track
-- [ ] Game-specific thresholds
+- [x] Track multiple games with separate limits
+- [x] Game groups: Limit "competitive games" combined (LoL + Valorant + CS2)
+- [x] Per-game opt-in: Choose which games to track
+- [x] Game-specific thresholds
 
 **Advanced Features** (Nice-to-have)
 - [ ] Integration with Riot Games API for match history
@@ -231,8 +231,8 @@ Set `announcement_channel_id` in the settings table to a Discord channel ID. Whe
 ## Current Status
 
 - **Phase 1** — Complete
-- **Phase 2** — In Testing
-- **Phase 3** — In Progress (leaderboard, mystats enhancements, custom roasts, weekly recaps done)
+- **Phase 2** — Complete
+- **Phase 3** — In Progress
 
 ---
 
