@@ -37,6 +37,67 @@ def _build_privacy_embed(user) -> discord.Embed:
     return embed
 
 
+def _build_mygames_embed(tracked_games, exclusions: list) -> discord.Embed:
+    """Build the embed for /mygames showing per-game tracking status."""
+    exclusion_set = {e.lower() for e in exclusions}
+    embed = discord.Embed(title="Your Game Tracking", color=discord.Color.blue())
+    lines = []
+    for tg in tracked_games:
+        if not tg.enabled:
+            continue
+        if tg.game_name.lower() in exclusion_set:
+            lines.append(f"❌ **{tg.game_name}** — *excluded*")
+        else:
+            lines.append(f"✅ **{tg.game_name}** — tracking")
+    embed.description = "\n".join(lines) if lines else "No active games are being tracked."
+    embed.set_footer(text="Use the menu below to toggle tracking for individual games.")
+    return embed
+
+
+class MyGamesToggleSelect(discord.ui.Select):
+    """Select menu for toggling per-game exclusions."""
+
+    def __init__(self, db, user_id: int, tracked_games):
+        self.db = db
+        self.user_id = user_id
+        self.tracked_games = [g for g in tracked_games if g.enabled]
+
+        exclusions = {e.lower() for e in db.get_user_game_exclusions(user_id)}
+        options = [
+            discord.SelectOption(
+                label=tg.game_name[:100],
+                value=tg.game_name,
+                description="Click to stop tracking" if tg.game_name.lower() not in exclusions
+                else "Click to resume tracking",
+                emoji="✅" if tg.game_name.lower() not in exclusions else "❌",
+            )
+            for tg in self.tracked_games
+        ][:25]
+
+        super().__init__(placeholder="Toggle a game on/off…", options=options, min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        game_name = self.values[0]
+        currently_excluded = self.db.is_user_excluded_from_game(self.user_id, game_name)
+        self.db.set_user_game_exclusion(self.user_id, game_name, not currently_excluded)
+
+        exclusions = self.db.get_user_game_exclusions(self.user_id)
+        embed = _build_mygames_embed(self.tracked_games, exclusions)
+        # Rebuild select with fresh states
+        view = MyGamesView(self.db, self.user_id, self.tracked_games)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+class MyGamesView(discord.ui.View):
+    """View for /mygames with a per-game toggle select."""
+
+    def __init__(self, db, user_id: int, tracked_games):
+        super().__init__(timeout=120)
+        active = [g for g in tracked_games if g.enabled]
+        if active:
+            self.add_item(MyGamesToggleSelect(db, user_id, tracked_games))
+
+
 class DeleteDataView(discord.ui.View):
     """Confirmation view for /delete-my-data."""
 
@@ -110,13 +171,13 @@ class Admin(commands.Cog):
     @app_commands.command(name="opt-in", description="Opt in to playtime tracking")
     async def opt_in(self, interaction: discord.Interaction):
         """Allow user to opt in to tracking."""
-        # Set user as opted in
         self.db.set_user_opt_in(interaction.user.id, True)
 
-        settings = self.db.get_settings()
+        tracked_games = [g for g in self.db.get_tracked_games() if g.enabled]
         rules = self.db.get_threshold_rules()
 
-        # Build rules summary grouped by window type
+        games_text = "\n".join(f"• {g.game_name}" for g in tracked_games) or "None configured."
+
         rules_by_window: dict[str, list] = {}
         for rule in rules:
             rules_by_window.setdefault(rule.window_type, []).append(rule)
@@ -126,19 +187,21 @@ class Admin(commands.Cog):
             label = WINDOW_LABELS.get(window_type, window_type)
             entries = []
             for r in window_rules:
+                scope = f" [{r.game_name}]" if r.game_name else ""
                 if r.action == "timeout":
-                    entries.append(f"{r.hours}h = {r.duration_hours}h timeout")
+                    entries.append(f"{r.hours}h{scope} = {r.duration_hours}h timeout")
                 else:
-                    entries.append(f"{r.hours}h = warning")
+                    entries.append(f"{r.hours}h{scope} = warning")
             rules_lines.append(f"**{label}:** {', '.join(entries)}")
 
         rules_text = "\n".join(rules_lines) if rules_lines else "No rules configured."
 
         await interaction.response.send_message(
             f"You've opted in to playtime tracking!\n\n"
-            f"**Target game:** {settings.target_game}\n\n"
+            f"**Tracked games:**\n{games_text}\n\n"
             f"**Thresholds:**\n{rules_text}\n\n"
             f"If you exceed a threshold, you may be warned or timed out.\n"
+            f"Use `/mygames` to manage per-game tracking preferences.\n"
             f"Use `/opt-out` to stop tracking at any time.",
             ephemeral=True
         )
@@ -227,6 +290,31 @@ class Admin(commands.Cog):
         view = PrivacyView(self.db, interaction.user.id, user.leaderboard_visible)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
+    @app_commands.command(name="mygames", description="View and manage which games are tracked for you")
+    async def mygames(self, interaction: discord.Interaction):
+        """Show all tracked games and let the user opt individual games in or out."""
+        user = self.db.get_user(interaction.user.id)
+        if user is None or not user.opted_in:
+            await interaction.response.send_message(
+                "You're not opted in to playtime tracking.\nUse `/opt-in` to start!",
+                ephemeral=True,
+            )
+            return
+
+        tracked_games = self.db.get_tracked_games()
+        if not [g for g in tracked_games if g.enabled]:
+            await interaction.response.send_message(
+                "No games are currently being tracked by the bot.\n"
+                "Ask an admin to add games with `/hammer games add`.",
+                ephemeral=True,
+            )
+            return
+
+        exclusions = self.db.get_user_game_exclusions(interaction.user.id)
+        embed = _build_mygames_embed(tracked_games, exclusions)
+        view = MyGamesView(self.db, interaction.user.id, tracked_games)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
     @app_commands.command(name="mystats", description="View your weekly playtime stats")
     async def mystats(self, interaction: discord.Interaction):
         """Show the invoking user their current playtime across all tracked windows."""
@@ -239,26 +327,29 @@ class Admin(commands.Cog):
             )
             return
 
-        settings = self.db.get_settings()
         rules = self.db.get_threshold_rules()
+        tracked_games = [g for g in self.db.get_tracked_games() if g.enabled]
 
-        # Group rules by window type
+        # Group rules by window type (global rules only for the main progress bars)
+        global_rules = [r for r in rules if r.game_name is None and r.group_id is None]
         rules_by_window: dict[str, list] = {}
-        for rule in rules:
+        for rule in global_rules:
             rules_by_window.setdefault(rule.window_type, []).append(rule)
 
-        # If no rules exist, fall back to legacy single-threshold display
-        if not rules:
+        if not global_rules:
             rules_by_window = {"rolling_7d": []}
 
-        # Compute playtime for each window and find the closest threshold
-        # Track the highest fill percentage for embed color
         max_fill_pct = 0.0
 
         embed = discord.Embed(title="Your Playtime Stats", color=discord.Color.green())
 
-        # Get active session for live time calculation
-        active_session = self.db.get_active_session(interaction.user.id, settings.target_game)
+        # Find any active session across all tracked games
+        active_session = None
+        for tg in tracked_games:
+            s = self.db.get_active_session(interaction.user.id, tg.game_name)
+            if s:
+                active_session = s
+                break
         active_elapsed = 0.0
         if active_session:
             active_elapsed = (
@@ -272,10 +363,17 @@ class Admin(commands.Cog):
 
             label = WINDOW_LABELS.get(window_type, window_type)
 
-            # Get base playtime (completed sessions)
-            playtime = self.db.get_playtime_for_window(
-                interaction.user.id, window_type
-            )
+            # For global rules: use the most-played game's playtime as the progress indicator
+            if tracked_games and window_type != "session":
+                game_times = [
+                    self.db.get_playtime_for_game_window(
+                        interaction.user.id, tg.game_name, window_type
+                    )
+                    for tg in tracked_games
+                ]
+                playtime = max(game_times) if game_times else 0.0
+            else:
+                playtime = self.db.get_playtime_for_window(interaction.user.id, window_type)
 
             # Add active session elapsed time for non-session windows
             if window_type != "session" and active_elapsed > 0:
@@ -312,11 +410,27 @@ class Admin(commands.Cog):
                 inline=False,
             )
 
+        # Per-game breakdown (rolling 7-day)
+        if len(tracked_games) > 1:
+            game_lines = []
+            for tg in tracked_games:
+                hours = self.db.get_playtime_for_game_window(
+                    interaction.user.id, tg.game_name, "rolling_7d"
+                )
+                if hours > 0:
+                    game_lines.append(f"**{tg.game_name}:** {hours:.1f}h")
+            if game_lines:
+                embed.add_field(
+                    name="Games This Week",
+                    value="\n".join(game_lines),
+                    inline=True,
+                )
+
         # Active session field
         if active_session and active_elapsed > 0:
             embed.add_field(
                 name="Active Session",
-                value=f"**{active_elapsed:.1f} hrs** this session",
+                value=f"**{active_elapsed:.1f} hrs** — {active_session.game_name}",
                 inline=True,
             )
 
@@ -618,6 +732,18 @@ class Admin(commands.Cog):
         parent=hammer,
     )
 
+    games = app_commands.Group(
+        name="games",
+        description="Manage tracked games",
+        parent=hammer,
+    )
+
+    groups = app_commands.Group(
+        name="groups",
+        description="Manage game groups for combined playtime limits",
+        parent=hammer,
+    )
+
     @hammer.command(name="on", description="Enable playtime tracking")
     async def hammer_on(self, interaction: discord.Interaction):
         """Enable playtime tracking."""
@@ -683,11 +809,23 @@ class Admin(commands.Cog):
             inline=True
         )
 
-        embed.add_field(
-            name="Target Game",
-            value=f"**{settings.target_game}**",
-            inline=False
-        )
+        tracked_games = self.db.get_tracked_games()
+        if tracked_games:
+            game_lines = []
+            for tg in tracked_games:
+                status = "" if tg.enabled else " *(disabled)*"
+                game_lines.append(f"• {tg.game_name}{status}")
+            embed.add_field(
+                name="Tracked Games",
+                value="\n".join(game_lines),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Tracked Games",
+                value=f"**{settings.target_game}** (legacy)",
+                inline=False,
+            )
 
         channel_text = "Not configured"
         if settings.announcement_channel_id:
@@ -761,8 +899,10 @@ class Admin(commands.Cog):
             return
 
         self.db.update_settings(target_game=game)
+        self.db.add_tracked_game(game)  # Also register in the multi-game registry
         await interaction.response.send_message(
-            f"Target game updated to **{game}**.",
+            f"Target game updated to **{game}** and added to tracked games.\n"
+            f"Use `/hammer games list` to see all tracked games.",
             ephemeral=True
         )
         print(f"Target game changed to '{game}' by admin")
@@ -796,13 +936,20 @@ class Admin(commands.Cog):
             label = WINDOW_LABELS.get(window_type, window_type)
             lines = []
             for r in window_rules:
+                if r.game_name:
+                    scope = f" `[{r.game_name}]`"
+                elif r.group_id:
+                    grp = self.db.get_game_group(r.group_id)
+                    grp_name = grp.group_name if grp else f"group #{r.group_id}"
+                    scope = f" `[group: {grp_name}]`"
+                else:
+                    scope = ""
                 if r.action == "timeout":
                     lines.append(
-                        f"`#{r.id}` — **{r.hours}h** = "
-                        f"**{r.duration_hours}h** timeout"
+                        f"`#{r.id}` — **{r.hours}h**{scope} = **{r.duration_hours}h** timeout"
                     )
                 else:
-                    lines.append(f"`#{r.id}` — **{r.hours}h** = warning")
+                    lines.append(f"`#{r.id}` — **{r.hours}h**{scope} = warning")
             embed.add_field(name=label, value="\n".join(lines), inline=False)
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -815,6 +962,8 @@ class Admin(commands.Cog):
         action="Action to take when threshold is reached",
         duration="Timeout duration in hours (required for timeout action)",
         window="Time window for this rule",
+        game="Optional: limit this rule to one specific game (leave empty = all games)",
+        group_id="Optional: limit this rule to a game group by ID (overrides 'game')",
     )
     @app_commands.choices(
         action=[
@@ -835,6 +984,8 @@ class Admin(commands.Cog):
         action: str,
         window: str,
         duration: Optional[int] = None,
+        game: Optional[str] = None,
+        group_id: Optional[int] = None,
     ):
         """Add a threshold rule after validating inputs."""
         if hours <= 0:
@@ -853,18 +1004,39 @@ class Admin(commands.Cog):
         if action == "warn":
             duration = None
 
+        # Validate group_id if provided
+        if group_id is not None:
+            grp = self.db.get_game_group(group_id)
+            if grp is None:
+                await interaction.response.send_message(
+                    f"No game group found with ID `#{group_id}`.", ephemeral=True
+                )
+                return
+            game = None  # group_id takes precedence
+
+        game = game.strip() if game else None
         rule = self.db.add_threshold_rule(
             hours=hours,
             action=action,
             duration_hours=duration,
             window_type=window,
+            game_name=game,
+            group_id=group_id,
         )
 
         label = WINDOW_LABELS.get(window, window)
-        if action == "timeout":
-            desc = f"**{hours}h** = **{duration}h** timeout"
+        if rule.game_name:
+            scope = f" for **{rule.game_name}**"
+        elif rule.group_id:
+            grp = self.db.get_game_group(rule.group_id)
+            scope = f" for group **{grp.group_name if grp else rule.group_id}**"
         else:
-            desc = f"**{hours}h** = warning"
+            scope = " (all tracked games)"
+
+        if action == "timeout":
+            desc = f"**{hours}h**{scope} = **{duration}h** timeout"
+        else:
+            desc = f"**{hours}h**{scope} = warning"
 
         await interaction.response.send_message(
             f"Rule `#{rule.id}` added to **{label}**:\n{desc}",
@@ -892,6 +1064,159 @@ class Admin(commands.Cog):
                 ephemeral=True
             )
 
+
+    # ===== /hammer games commands =====
+
+    @games.command(name="list", description="List all tracked games")
+    async def games_list(self, interaction: discord.Interaction):
+        """Display all games currently registered for tracking."""
+        tracked = self.db.get_tracked_games()
+        if not tracked:
+            await interaction.response.send_message(
+                "No tracked games configured.\n"
+                "Use `/hammer games add` to add one.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(title="Tracked Games", color=discord.Color.blue())
+        lines = []
+        for tg in tracked:
+            status = "✅ enabled" if tg.enabled else "⏸ disabled"
+            lines.append(f"`#{tg.id}` **{tg.game_name}** — {status}")
+        embed.description = "\n".join(lines)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @games.command(name="add", description="Add a game to the tracking registry")
+    @app_commands.describe(game="The game name to track (case-insensitive matching)")
+    async def games_add(self, interaction: discord.Interaction, game: str):
+        """Register a new game for presence tracking."""
+        game = game.strip()
+        if not game:
+            await interaction.response.send_message("Game name cannot be empty.", ephemeral=True)
+            return
+
+        tg = self.db.add_tracked_game(game)
+        await interaction.response.send_message(
+            f"**{tg.game_name}** is now being tracked. "
+            f"Opted-in users will have their sessions recorded automatically.",
+            ephemeral=True,
+        )
+        print(f"Tracked game '{tg.game_name}' added by admin")
+
+    @games.command(name="remove", description="Remove a game from the tracking registry")
+    @app_commands.describe(game="The game name to stop tracking")
+    async def games_remove(self, interaction: discord.Interaction, game: str):
+        """Unregister a game. Existing sessions are preserved."""
+        removed = self.db.remove_tracked_game(game.strip())
+        if removed:
+            await interaction.response.send_message(
+                f"**{game}** removed from tracked games. "
+                f"Existing session history is preserved.",
+                ephemeral=True,
+            )
+            print(f"Tracked game '{game}' removed by admin")
+        else:
+            await interaction.response.send_message(
+                f"No tracked game matching **{game}** was found.", ephemeral=True
+            )
+
+    # ===== /hammer groups commands =====
+
+    @groups.command(name="list", description="List all game groups")
+    async def groups_list(self, interaction: discord.Interaction):
+        """Display all game groups and their members."""
+        all_groups = self.db.get_game_groups()
+        if not all_groups:
+            await interaction.response.send_message(
+                "No game groups configured.\n"
+                "Use `/hammer groups create` to make one.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(title="Game Groups", color=discord.Color.blue())
+        for grp in all_groups:
+            members = ", ".join(grp.members) if grp.members else "*No members yet*"
+            embed.add_field(name=f"`#{grp.id}` {grp.group_name}", value=members, inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @groups.command(name="create", description="Create a new game group")
+    @app_commands.describe(name="A short name for the group, e.g. 'competitive'")
+    async def groups_create(self, interaction: discord.Interaction, name: str):
+        """Create an empty game group."""
+        name = name.strip()
+        if not name:
+            await interaction.response.send_message("Group name cannot be empty.", ephemeral=True)
+            return
+        try:
+            grp = self.db.create_game_group(name)
+            await interaction.response.send_message(
+                f"Group **{grp.group_name}** created (ID `#{grp.id}`).\n"
+                f"Add games with `/hammer groups addgame {grp.id} <game>`.",
+                ephemeral=True,
+            )
+            print(f"Game group '{grp.group_name}' created by admin")
+        except Exception:
+            await interaction.response.send_message(
+                f"A group named **{name}** already exists.", ephemeral=True
+            )
+
+    @groups.command(name="delete", description="Delete a game group by ID")
+    @app_commands.describe(group_id="The group ID to delete (shown in groups list)")
+    async def groups_delete(self, interaction: discord.Interaction, group_id: int):
+        """Delete a game group. Rules referencing this group are NOT auto-deleted."""
+        grp = self.db.get_game_group(group_id)
+        if grp is None:
+            await interaction.response.send_message(
+                f"No group found with ID `#{group_id}`.", ephemeral=True
+            )
+            return
+        self.db.delete_game_group(group_id)
+        await interaction.response.send_message(
+            f"Group **{grp.group_name}** (`#{group_id}`) deleted.", ephemeral=True
+        )
+        print(f"Game group #{group_id} deleted by admin")
+
+    @groups.command(name="addgame", description="Add a game to a group")
+    @app_commands.describe(group_id="The group ID", game="Game name to add")
+    async def groups_addgame(self, interaction: discord.Interaction, group_id: int, game: str):
+        """Add a tracked game to a group for combined playtime tracking."""
+        grp = self.db.get_game_group(group_id)
+        if grp is None:
+            await interaction.response.send_message(
+                f"No group found with ID `#{group_id}`.", ephemeral=True
+            )
+            return
+        added = self.db.add_game_to_group(group_id, game.strip())
+        if added:
+            await interaction.response.send_message(
+                f"**{game}** added to group **{grp.group_name}**.", ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"**{game}** is already a member of **{grp.group_name}**.", ephemeral=True
+            )
+
+    @groups.command(name="removegame", description="Remove a game from a group")
+    @app_commands.describe(group_id="The group ID", game="Game name to remove")
+    async def groups_removegame(self, interaction: discord.Interaction, group_id: int, game: str):
+        """Remove a game from a group."""
+        grp = self.db.get_game_group(group_id)
+        if grp is None:
+            await interaction.response.send_message(
+                f"No group found with ID `#{group_id}`.", ephemeral=True
+            )
+            return
+        removed = self.db.remove_game_from_group(group_id, game.strip())
+        if removed:
+            await interaction.response.send_message(
+                f"**{game}** removed from group **{grp.group_name}**.", ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"**{game}** was not found in group **{grp.group_name}**.", ephemeral=True
+            )
 
     # ----- /hammer roasts list -----
 

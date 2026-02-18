@@ -6,7 +6,7 @@ import discord
 import pytest
 
 from app.cogs.watcher import Watcher
-from app.core.models import BotSettings, PlaySession, ThresholdRule, User
+from app.core.models import BotSettings, PlaySession, ThresholdRule, TrackedGame, User
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -53,6 +53,11 @@ def db():
     mock.get_last_threshold_event_time.return_value = None
     mock.has_proactive_warning_been_sent.return_value = False
     mock.get_custom_roasts.return_value = []
+    # Multi-game support
+    mock.get_tracked_games.return_value = [TrackedGame(id=1, game_name="League of Legends")]
+    mock.get_groups_containing_game.return_value = []
+    mock.is_user_excluded_from_game.return_value = False
+    mock.get_playtime_for_game_window.return_value = 0.0
     return mock
 
 
@@ -84,7 +89,7 @@ def member():
 
 async def test_check_threshold_below_all(cog, db, member):
     """Playtime below all thresholds does nothing."""
-    db.get_playtime_for_window.return_value = 5.0
+    db.get_playtime_for_game_window.return_value = 5.0
 
     await cog._check_threshold(member, COMPLETED_SESSION)
 
@@ -111,12 +116,14 @@ async def test_check_threshold_no_rules(cog, db, member):
 @patch("app.cogs.watcher.get_roast", return_value="Touch grass challenge: FAILED")
 async def test_check_threshold_warn(mock_roast, cog, db, member):
     """Exceeding warn threshold sends a warning (DM fallback, no channel)."""
-    db.get_playtime_for_window.return_value = 12.0
+    db.get_playtime_for_game_window.return_value = 12.0
 
     await cog._check_threshold(member, COMPLETED_SESSION)
 
     # Should record the event for rule 1 (10h warn)
-    db.record_threshold_event.assert_called_once_with(123456789, 1, "rolling_7d")
+    db.record_threshold_event.assert_called_once_with(
+        123456789, 1, "rolling_7d", game_name="League of Legends"
+    )
 
     # Should NOT timeout
     member.timeout.assert_not_called()
@@ -135,7 +142,7 @@ async def test_check_threshold_warn(mock_roast, cog, db, member):
 @patch("app.cogs.watcher.get_roast", return_value="Mjolnir has spoken.")
 async def test_check_threshold_timeout(mock_roast, cog, db, member):
     """Exceeding timeout threshold applies timeout and sends message."""
-    db.get_playtime_for_window.return_value = 22.0
+    db.get_playtime_for_game_window.return_value = 22.0
 
     await cog._check_threshold(member, COMPLETED_SESSION)
 
@@ -156,10 +163,10 @@ async def test_check_threshold_timeout(mock_roast, cog, db, member):
 @patch("app.cogs.watcher.get_roast", return_value="Test roast")
 async def test_check_threshold_skips_already_triggered(mock_roast, cog, db, member):
     """Already-triggered rules are skipped."""
-    db.get_playtime_for_window.return_value = 22.0
+    db.get_playtime_for_game_window.return_value = 22.0
 
     # Rules 1 and 2 already triggered
-    def triggered_side_effect(user_id, rule_id, window_type):
+    def triggered_side_effect(user_id, rule_id, window_type, game_name=None):
         return rule_id in (1, 2)
 
     db.has_threshold_been_triggered.side_effect = triggered_side_effect
@@ -167,7 +174,9 @@ async def test_check_threshold_skips_already_triggered(mock_roast, cog, db, memb
     await cog._check_threshold(member, COMPLETED_SESSION)
 
     # Only rule 3 should be recorded
-    db.record_threshold_event.assert_called_once_with(123456789, 3, "rolling_7d")
+    db.record_threshold_event.assert_called_once_with(
+        123456789, 3, "rolling_7d", game_name="League of Legends"
+    )
 
     # Should timeout with rule 3 (6h)
     member.timeout.assert_called_once()
@@ -175,7 +184,7 @@ async def test_check_threshold_skips_already_triggered(mock_roast, cog, db, memb
 
 async def test_check_threshold_all_already_triggered(cog, db, member):
     """All matching rules already triggered does nothing."""
-    db.get_playtime_for_window.return_value = 22.0
+    db.get_playtime_for_game_window.return_value = 22.0
     db.has_threshold_been_triggered.return_value = True
 
     await cog._check_threshold(member, COMPLETED_SESSION)
@@ -194,7 +203,7 @@ async def test_check_threshold_all_already_triggered(cog, db, member):
 async def test_check_threshold_posts_to_channel(mock_roast, cog, db, member):
     """When announcement channel is configured, posts there instead of DM."""
     db.get_settings.return_value = SETTINGS_WITH_CHANNEL
-    db.get_playtime_for_window.return_value = 12.0
+    db.get_playtime_for_game_window.return_value = 12.0
 
     # Set up a mock channel
     channel = MagicMock()
@@ -215,7 +224,7 @@ async def test_check_threshold_posts_to_channel(mock_roast, cog, db, member):
 async def test_check_threshold_falls_back_to_dm(mock_roast, cog, db, member):
     """When channel send fails, falls back to DM."""
     db.get_settings.return_value = SETTINGS_WITH_CHANNEL
-    db.get_playtime_for_window.return_value = 12.0
+    db.get_playtime_for_game_window.return_value = 12.0
 
     # Channel exists but send fails
     channel = MagicMock()
@@ -240,19 +249,21 @@ async def test_check_threshold_multi_window(mock_roast, cog, db, member):
     rolling_rule = ThresholdRule(id=1, hours=10.0, action="warn", window_type="rolling_7d")
     db.get_threshold_rules.return_value = [rolling_rule, daily_rule]
 
-    def playtime_side_effect(user_id, window_type, session=None):
+    def playtime_side_effect(user_id, game_name, window_type, session=None):
         if window_type == "daily":
             return 5.0  # exceeds 4h daily
         elif window_type == "rolling_7d":
             return 8.0  # does not exceed 10h rolling
         return 0.0
 
-    db.get_playtime_for_window.side_effect = playtime_side_effect
+    db.get_playtime_for_game_window.side_effect = playtime_side_effect
 
     await cog._check_threshold(member, COMPLETED_SESSION)
 
     # Only daily rule should trigger
-    db.record_threshold_event.assert_called_once_with(123456789, 10, "daily")
+    db.record_threshold_event.assert_called_once_with(
+        123456789, 10, "daily", game_name="League of Legends"
+    )
 
     # Warn, not timeout
     member.timeout.assert_not_called()
@@ -295,7 +306,7 @@ async def test_cooldown_clears_old_events(cog, db, member):
     db.get_last_threshold_event_time.return_value = (
         datetime.now(timezone.utc) - timedelta(days=5)
     )
-    db.get_playtime_for_window.return_value = 5.0  # Below all thresholds
+    db.get_playtime_for_game_window.return_value = 5.0  # Below all thresholds
 
     await cog._check_threshold(member, COMPLETED_SESSION)
 
@@ -308,7 +319,7 @@ async def test_cooldown_preserves_recent_events(cog, db, member):
     db.get_last_threshold_event_time.return_value = (
         datetime.now(timezone.utc) - timedelta(days=1)
     )
-    db.get_playtime_for_window.return_value = 5.0
+    db.get_playtime_for_game_window.return_value = 5.0
 
     await cog._check_threshold(member, COMPLETED_SESSION)
 
@@ -322,7 +333,7 @@ async def test_cooldown_preserves_recent_events(cog, db, member):
 
 async def test_proactive_warning_sent_at_threshold(cog, db, member):
     """At 90% of next threshold (9h of 10h), a proactive DM is sent."""
-    db.get_playtime_for_window.return_value = 9.5  # 95% of 10h
+    db.get_playtime_for_game_window.return_value = 9.5  # 95% of 10h
 
     await cog._check_threshold(member, COMPLETED_SESSION)
 
@@ -339,7 +350,7 @@ async def test_proactive_warning_sent_at_threshold(cog, db, member):
 
 async def test_proactive_warning_not_sent_below_pct(cog, db, member):
     """At 80% of threshold (8h of 10h), no proactive warning (pct=0.9)."""
-    db.get_playtime_for_window.return_value = 8.0  # 80% of 10h
+    db.get_playtime_for_game_window.return_value = 8.0  # 80% of 10h
 
     await cog._check_threshold(member, COMPLETED_SESSION)
 
@@ -350,7 +361,7 @@ async def test_proactive_warning_not_sent_below_pct(cog, db, member):
 
 async def test_proactive_warning_dedup(cog, db, member):
     """Proactive warning is not sent twice for the same rule in a window."""
-    db.get_playtime_for_window.return_value = 9.5
+    db.get_playtime_for_game_window.return_value = 9.5
     db.has_proactive_warning_been_sent.return_value = True  # Already warned
 
     await cog._check_threshold(member, COMPLETED_SESSION)
@@ -366,7 +377,7 @@ async def test_proactive_warning_disabled_when_pct_zero(cog, db, member):
         target_game="League of Legends",
         warning_threshold_pct=0.0,
     )
-    db.get_playtime_for_window.return_value = 9.5
+    db.get_playtime_for_game_window.return_value = 9.5
 
     await cog._check_threshold(member, COMPLETED_SESSION)
 

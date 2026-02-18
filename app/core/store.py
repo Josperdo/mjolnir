@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from .models import AuditLog, BotSettings, CustomRoast, PlaySession, ThresholdEvent, ThresholdRule, User
+from .models import AuditLog, BotSettings, CustomRoast, GameGroup, PlaySession, ThresholdEvent, ThresholdRule, TrackedGame, User
 
 
 class Database:
@@ -102,6 +102,17 @@ class Database:
             INSERT OR IGNORE INTO settings (id) VALUES (1)
         """)
 
+        # Seed tracked_games from target_game if the table is still empty
+        cursor.execute("SELECT COUNT(*) as cnt FROM tracked_games")
+        if cursor.fetchone()["cnt"] == 0:
+            cursor.execute("SELECT target_game FROM settings WHERE id = 1")
+            row = cursor.fetchone()
+            if row:
+                cursor.execute(
+                    "INSERT OR IGNORE INTO tracked_games (game_name, enabled, added_at) VALUES (?, 1, ?)",
+                    (row["target_game"], datetime.now(timezone.utc))
+                )
+
         # Audit log table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
@@ -141,6 +152,42 @@ class Database:
             )
         """)
 
+        # Tracked games registry
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tracked_games (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_name TEXT NOT NULL UNIQUE,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                added_at TIMESTAMP NOT NULL
+            )
+        """)
+
+        # Game groups for combined playtime limits
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS game_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_name TEXT NOT NULL UNIQUE,
+                created_at TIMESTAMP NOT NULL
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS game_group_members (
+                group_id INTEGER NOT NULL REFERENCES game_groups(id) ON DELETE CASCADE,
+                game_name TEXT NOT NULL,
+                PRIMARY KEY (group_id, game_name)
+            )
+        """)
+
+        # Per-user per-game exclusions (users can opt out of specific games)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_game_exclusions (
+                user_id INTEGER NOT NULL REFERENCES users(user_id),
+                game_name TEXT NOT NULL,
+                PRIMARY KEY (user_id, game_name)
+            )
+        """)
+
         # Seed default threshold rules if table is empty
         cursor.execute("SELECT COUNT(*) as cnt FROM threshold_rules")
         if cursor.fetchone()["cnt"] == 0:
@@ -173,6 +220,9 @@ class Database:
             ("settings", "weekly_recap_day", "INTEGER NOT NULL DEFAULT 0"),
             ("settings", "weekly_recap_hour", "INTEGER NOT NULL DEFAULT 9"),
             ("settings", "last_weekly_recap_at", "TIMESTAMP"),
+            # Multi-game support columns on threshold_rules
+            ("threshold_rules", "game_name", "TEXT DEFAULT NULL"),
+            ("threshold_rules", "group_id", "INTEGER DEFAULT NULL"),
         ]
         for table, column, col_type in migrations:
             try:
@@ -181,6 +231,29 @@ class Database:
                 )
             except sqlite3.OperationalError:
                 pass  # Column already exists
+
+        # Add game_name to threshold_events; backfill existing rows with target_game
+        # (all pre-migration events were for the single global target game)
+        try:
+            cursor.execute("ALTER TABLE threshold_events ADD COLUMN game_name TEXT DEFAULT NULL")
+            cursor.execute("""
+                UPDATE threshold_events
+                SET game_name = (SELECT target_game FROM settings WHERE id = 1)
+                WHERE game_name IS NULL
+            """)
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
+        # Same for proactive_warnings
+        try:
+            cursor.execute("ALTER TABLE proactive_warnings ADD COLUMN game_name TEXT DEFAULT NULL")
+            cursor.execute("""
+                UPDATE proactive_warnings
+                SET game_name = (SELECT target_game FROM settings WHERE id = 1)
+                WHERE game_name IS NULL
+            """)
+        except sqlite3.OperationalError:
+            pass
 
     # ===== User operations =====
 
@@ -478,6 +551,8 @@ class Database:
                 duration_hours=row["duration_hours"],
                 message=row["message"],
                 window_type=row["window_type"],
+                game_name=row["game_name"],
+                group_id=row["group_id"],
             )
             for row in cursor.fetchall()
         ]
@@ -496,20 +571,24 @@ class Database:
                 duration_hours=row["duration_hours"],
                 message=row["message"],
                 window_type=row["window_type"],
+                game_name=row["game_name"],
+                group_id=row["group_id"],
             )
         return None
 
     def add_threshold_rule(self, hours: float, action: str,
                            duration_hours: Optional[int] = None,
                            message: Optional[str] = None,
-                           window_type: str = "rolling_7d") -> ThresholdRule:
+                           window_type: str = "rolling_7d",
+                           game_name: Optional[str] = None,
+                           group_id: Optional[int] = None) -> ThresholdRule:
         """Add a new threshold rule and return it."""
         cursor = self.conn.cursor()
         cursor.execute(
             """INSERT INTO threshold_rules
-               (hours, action, duration_hours, message, window_type)
-               VALUES (?, ?, ?, ?, ?)""",
-            (hours, action, duration_hours, message, window_type)
+               (hours, action, duration_hours, message, window_type, game_name, group_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (hours, action, duration_hours, message, window_type, game_name, group_id)
         )
         self.conn.commit()
 
@@ -520,6 +599,8 @@ class Database:
             duration_hours=duration_hours,
             message=message,
             window_type=window_type,
+            game_name=game_name,
+            group_id=group_id,
         )
 
     def delete_threshold_rule(self, rule_id: int) -> bool:
@@ -528,6 +609,229 @@ class Database:
         cursor.execute("DELETE FROM threshold_rules WHERE id = ?", (rule_id,))
         self.conn.commit()
         return cursor.rowcount > 0
+
+    # ===== Tracked game operations =====
+
+    def get_tracked_games(self) -> List[TrackedGame]:
+        """Return all tracked games ordered by name."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM tracked_games ORDER BY game_name")
+        return [
+            TrackedGame(
+                id=row["id"],
+                game_name=row["game_name"],
+                enabled=bool(row["enabled"]),
+                added_at=row["added_at"],
+            )
+            for row in cursor.fetchall()
+        ]
+
+    def add_tracked_game(self, game_name: str) -> TrackedGame:
+        """Add a game to the tracking registry. Silently ignores duplicates."""
+        cursor = self.conn.cursor()
+        added_at = datetime.now(timezone.utc)
+        cursor.execute(
+            "INSERT OR IGNORE INTO tracked_games (game_name, enabled, added_at) VALUES (?, 1, ?)",
+            (game_name, added_at)
+        )
+        self.conn.commit()
+        # Re-fetch to return the actual row (handles the OR IGNORE case)
+        cursor.execute("SELECT * FROM tracked_games WHERE LOWER(game_name) = LOWER(?)", (game_name,))
+        row = cursor.fetchone()
+        return TrackedGame(id=row["id"], game_name=row["game_name"],
+                           enabled=bool(row["enabled"]), added_at=row["added_at"])
+
+    def remove_tracked_game(self, game_name: str) -> bool:
+        """Remove a game from the tracking registry. Returns True if found."""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM tracked_games WHERE LOWER(game_name) = LOWER(?)", (game_name,))
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def set_game_enabled(self, game_name: str, enabled: bool) -> None:
+        """Enable or disable tracking for a specific game."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "UPDATE tracked_games SET enabled = ? WHERE LOWER(game_name) = LOWER(?)",
+            (int(enabled), game_name)
+        )
+        self.conn.commit()
+
+    # ===== Game group operations =====
+
+    def get_game_groups(self) -> List[GameGroup]:
+        """Return all game groups with their member lists."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM game_groups ORDER BY group_name")
+        groups = []
+        for row in cursor.fetchall():
+            cursor2 = self.conn.cursor()
+            cursor2.execute(
+                "SELECT game_name FROM game_group_members WHERE group_id = ? ORDER BY game_name",
+                (row["id"],)
+            )
+            members = [r["game_name"] for r in cursor2.fetchall()]
+            groups.append(GameGroup(
+                id=row["id"],
+                group_name=row["group_name"],
+                members=members,
+                created_at=row["created_at"],
+            ))
+        return groups
+
+    def get_game_group(self, group_id: int) -> Optional[GameGroup]:
+        """Return a single game group by ID, or None."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM game_groups WHERE id = ?", (group_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        cursor.execute(
+            "SELECT game_name FROM game_group_members WHERE group_id = ? ORDER BY game_name",
+            (group_id,)
+        )
+        members = [r["game_name"] for r in cursor.fetchall()]
+        return GameGroup(id=row["id"], group_name=row["group_name"],
+                         members=members, created_at=row["created_at"])
+
+    def create_game_group(self, group_name: str) -> GameGroup:
+        """Create a new game group."""
+        cursor = self.conn.cursor()
+        created_at = datetime.now(timezone.utc)
+        cursor.execute(
+            "INSERT INTO game_groups (group_name, created_at) VALUES (?, ?)",
+            (group_name, created_at)
+        )
+        self.conn.commit()
+        return GameGroup(id=cursor.lastrowid, group_name=group_name,
+                         members=[], created_at=created_at)
+
+    def delete_game_group(self, group_id: int) -> bool:
+        """Delete a game group and its membership records."""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM game_group_members WHERE group_id = ?", (group_id,))
+        cursor.execute("DELETE FROM game_groups WHERE id = ?", (group_id,))
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def add_game_to_group(self, group_id: int, game_name: str) -> bool:
+        """Add a game to a group. Returns False if already a member."""
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(
+                "INSERT INTO game_group_members (group_id, game_name) VALUES (?, ?)",
+                (group_id, game_name)
+            )
+            self.conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def remove_game_from_group(self, group_id: int, game_name: str) -> bool:
+        """Remove a game from a group."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM game_group_members WHERE group_id = ? AND LOWER(game_name) = LOWER(?)",
+            (group_id, game_name)
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def get_groups_containing_game(self, game_name: str) -> List[int]:
+        """Return IDs of groups that include the given game."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT DISTINCT group_id FROM game_group_members WHERE LOWER(game_name) = LOWER(?)",
+            (game_name,)
+        )
+        return [row["group_id"] for row in cursor.fetchall()]
+
+    # ===== Per-user game exclusion operations =====
+
+    def is_user_excluded_from_game(self, user_id: int, game_name: str) -> bool:
+        """Return True if the user has excluded this game from their tracking."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """SELECT COUNT(*) as cnt FROM user_game_exclusions
+               WHERE user_id = ? AND LOWER(game_name) = LOWER(?)""",
+            (user_id, game_name)
+        )
+        return cursor.fetchone()["cnt"] > 0
+
+    def set_user_game_exclusion(self, user_id: int, game_name: str, excluded: bool) -> None:
+        """Add or remove a per-game exclusion for a user."""
+        cursor = self.conn.cursor()
+        if excluded:
+            cursor.execute(
+                "INSERT OR IGNORE INTO user_game_exclusions (user_id, game_name) VALUES (?, ?)",
+                (user_id, game_name)
+            )
+        else:
+            cursor.execute(
+                "DELETE FROM user_game_exclusions WHERE user_id = ? AND LOWER(game_name) = LOWER(?)",
+                (user_id, game_name)
+            )
+        self.conn.commit()
+
+    def get_user_game_exclusions(self, user_id: int) -> List[str]:
+        """Return game names the user has explicitly excluded."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT game_name FROM user_game_exclusions WHERE user_id = ?",
+            (user_id,)
+        )
+        return [row["game_name"] for row in cursor.fetchall()]
+
+    # ===== Per-game / group playtime queries =====
+
+    def get_playtime_for_game_window(self, user_id: int, game_name: str,
+                                     window_type: str,
+                                     session: Optional[PlaySession] = None) -> float:
+        """Get playtime for a specific game in the given window (hours)."""
+        if window_type == "session":
+            if session and session.game_name.lower() == game_name.lower():
+                return session.duration_hours
+            return 0.0
+
+        cursor = self.conn.cursor()
+        now = datetime.now(timezone.utc)
+
+        if window_type == "rolling_7d":
+            cutoff = now - timedelta(days=7)
+        elif window_type == "daily":
+            cutoff = now - timedelta(hours=24)
+        elif window_type == "weekly":
+            cutoff = now - timedelta(days=now.weekday(), hours=now.hour,
+                                     minutes=now.minute, seconds=now.second,
+                                     microseconds=now.microsecond)
+        else:
+            return 0.0
+
+        cursor.execute(
+            """SELECT SUM(duration_seconds) as total FROM play_sessions
+               WHERE user_id = ? AND LOWER(game_name) = LOWER(?)
+                 AND start_time >= ? AND end_time IS NOT NULL""",
+            (user_id, game_name, cutoff)
+        )
+        row = cursor.fetchone()
+        return (row["total"] or 0) / 3600
+
+    def get_playtime_for_group_window(self, user_id: int, group_id: int,
+                                      window_type: str,
+                                      session: Optional[PlaySession] = None) -> float:
+        """Get combined playtime for all games in a group for the given window."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT game_name FROM game_group_members WHERE group_id = ?",
+            (group_id,)
+        )
+        game_names = [row["game_name"] for row in cursor.fetchall()]
+        if not game_names:
+            return 0.0
+        return sum(
+            self.get_playtime_for_game_window(user_id, gn, window_type, session)
+            for gn in game_names
+        )
 
     def get_daily_playtime(self, user_id: int) -> float:
         """Get total playtime in hours for the past 24 hours."""
@@ -579,9 +883,14 @@ class Database:
         return 0.0
 
     def has_threshold_been_triggered(self, user_id: int, rule_id: int,
-                                     window_type: str) -> bool:
-        """Check if a threshold event exists for this user+rule within the current window."""
-        # Session rules fire every qualifying session
+                                     window_type: str,
+                                     game_name: Optional[str] = None) -> bool:
+        """Check if a threshold event exists for this user+rule within the current window.
+
+        For global rules (game_name provided): dedup is per-game so separate games
+        each get their own trigger record. Pass game_name=None for game-specific and
+        group rules where the rule_id itself already encodes the scope.
+        """
         if window_type == "session":
             return False
 
@@ -599,22 +908,36 @@ class Database:
         else:
             return False
 
-        cursor.execute(
-            """SELECT COUNT(*) as cnt FROM threshold_events
-               WHERE user_id = ? AND rule_id = ? AND triggered_at >= ?""",
-            (user_id, rule_id, window_start)
-        )
+        if game_name is not None:
+            cursor.execute(
+                """SELECT COUNT(*) as cnt FROM threshold_events
+                   WHERE user_id = ? AND rule_id = ? AND triggered_at >= ?
+                     AND LOWER(game_name) = LOWER(?)""",
+                (user_id, rule_id, window_start, game_name)
+            )
+        else:
+            cursor.execute(
+                """SELECT COUNT(*) as cnt FROM threshold_events
+                   WHERE user_id = ? AND rule_id = ? AND triggered_at >= ?
+                     AND game_name IS NULL""",
+                (user_id, rule_id, window_start)
+            )
 
         return cursor.fetchone()["cnt"] > 0
 
     def record_threshold_event(self, user_id: int, rule_id: int,
-                               window_type: str) -> None:
-        """Record that a threshold rule was triggered for a user."""
+                               window_type: str,
+                               game_name: Optional[str] = None) -> None:
+        """Record that a threshold rule was triggered for a user.
+
+        game_name should be set for global rules (enables per-game dedup),
+        and left None for game-specific / group rules.
+        """
         cursor = self.conn.cursor()
         cursor.execute(
-            """INSERT INTO threshold_events (user_id, rule_id, triggered_at, window_type)
-               VALUES (?, ?, ?, ?)""",
-            (user_id, rule_id, datetime.now(timezone.utc), window_type)
+            """INSERT INTO threshold_events (user_id, rule_id, triggered_at, window_type, game_name)
+               VALUES (?, ?, ?, ?, ?)""",
+            (user_id, rule_id, datetime.now(timezone.utc), window_type, game_name)
         )
         self.conn.commit()
 
@@ -708,7 +1031,8 @@ class Database:
     # ===== Proactive warning operations =====
 
     def has_proactive_warning_been_sent(self, user_id: int, rule_id: int,
-                                         window_type: str) -> bool:
+                                         window_type: str,
+                                         game_name: Optional[str] = None) -> bool:
         """Check if a proactive warning was already sent for this user+rule in the window."""
         if window_type == "session":
             return False
@@ -727,21 +1051,31 @@ class Database:
         else:
             return False
 
-        cursor.execute(
-            """SELECT COUNT(*) as cnt FROM proactive_warnings
-               WHERE user_id = ? AND rule_id = ? AND warned_at >= ?""",
-            (user_id, rule_id, window_start)
-        )
+        if game_name is not None:
+            cursor.execute(
+                """SELECT COUNT(*) as cnt FROM proactive_warnings
+                   WHERE user_id = ? AND rule_id = ? AND warned_at >= ?
+                     AND LOWER(game_name) = LOWER(?)""",
+                (user_id, rule_id, window_start, game_name)
+            )
+        else:
+            cursor.execute(
+                """SELECT COUNT(*) as cnt FROM proactive_warnings
+                   WHERE user_id = ? AND rule_id = ? AND warned_at >= ?
+                     AND game_name IS NULL""",
+                (user_id, rule_id, window_start)
+            )
         return cursor.fetchone()["cnt"] > 0
 
     def record_proactive_warning(self, user_id: int, rule_id: int,
-                                  window_type: str) -> None:
+                                  window_type: str,
+                                  game_name: Optional[str] = None) -> None:
         """Record that a proactive warning was sent."""
         cursor = self.conn.cursor()
         cursor.execute(
-            """INSERT INTO proactive_warnings (user_id, rule_id, warned_at, window_type)
-               VALUES (?, ?, ?, ?)""",
-            (user_id, rule_id, datetime.now(timezone.utc), window_type)
+            """INSERT INTO proactive_warnings (user_id, rule_id, warned_at, window_type, game_name)
+               VALUES (?, ?, ?, ?, ?)""",
+            (user_id, rule_id, datetime.now(timezone.utc), window_type, game_name)
         )
         self.conn.commit()
 

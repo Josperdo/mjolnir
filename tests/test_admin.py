@@ -6,7 +6,7 @@ import discord
 import pytest
 
 from app.cogs.admin import Admin
-from app.core.models import AuditLog, BotSettings, CustomRoast, PlaySession, ThresholdRule, User
+from app.core.models import AuditLog, BotSettings, CustomRoast, PlaySession, ThresholdRule, TrackedGame, User
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -158,7 +158,10 @@ async def test_mystats_active_session_adds_live_time(cog, db, interaction):
     """1h completed + 2h live = 3h total. Active session field appears."""
     db.get_user.return_value = User(user_id=123456789, opted_in=True)
     db.get_settings.return_value = DEFAULT_SETTINGS
-    db.get_playtime_for_window.return_value = 1.0
+    # Multi-game support: mystats loops over tracked games to find active session
+    db.get_tracked_games.return_value = [TrackedGame(id=1, game_name="League of Legends")]
+    db.get_playtime_for_game_window.return_value = 1.0
+    db.get_playtime_for_window.return_value = 1.0  # used for upcoming thresholds section
     db.get_active_session.return_value = PlaySession(
         id=1,
         user_id=123456789,
@@ -276,7 +279,7 @@ async def test_hammer_status_shows_embed(cog, db, interaction):
     field_names = [f.name for f in embed.fields]
     assert "Tracking Status" in field_names
     assert "Opted-In Users" in field_names
-    assert "Target Game" in field_names
+    assert "Tracked Games" in field_names
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +366,8 @@ async def test_rules_add_warn(cog, db, interaction):
     )
 
     db.add_threshold_rule.assert_called_once_with(
-        hours=8.0, action="warn", duration_hours=None, window_type="daily"
+        hours=8.0, action="warn", duration_hours=None, window_type="daily",
+        game_name=None, group_id=None,
     )
     msg = interaction.response.send_message.call_args[0][0]
     assert "#5" in msg
@@ -382,7 +386,8 @@ async def test_rules_add_timeout(cog, db, interaction):
     )
 
     db.add_threshold_rule.assert_called_once_with(
-        hours=12.0, action="timeout", duration_hours=2, window_type="rolling_7d"
+        hours=12.0, action="timeout", duration_hours=2, window_type="rolling_7d",
+        game_name=None, group_id=None,
     )
     msg = interaction.response.send_message.call_args[0][0]
     assert "#6" in msg

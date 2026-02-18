@@ -2,7 +2,7 @@
 Database models for Mjolnir.
 Defines the schema for tracking users, play sessions, and settings.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -62,6 +62,32 @@ class BotSettings:
 
 
 @dataclass
+class TrackedGame:
+    """A game the bot monitors for playtime."""
+    id: Optional[int] = None
+    game_name: str = ""
+    enabled: bool = True
+    added_at: Optional[datetime] = None
+
+    def __post_init__(self):
+        if self.added_at is None:
+            self.added_at = datetime.now(timezone.utc)
+
+
+@dataclass
+class GameGroup:
+    """A named group of games whose playtime is tracked combined."""
+    id: Optional[int] = None
+    group_name: str = ""
+    members: list = field(default_factory=list)  # List[str] of game_names
+    created_at: Optional[datetime] = None
+
+    def __post_init__(self):
+        if self.created_at is None:
+            self.created_at = datetime.now(timezone.utc)
+
+
+@dataclass
 class ThresholdRule:
     """A single threshold rule defining an action at a playtime boundary."""
     id: Optional[int] = None
@@ -70,6 +96,8 @@ class ThresholdRule:
     duration_hours: Optional[int] = None  # timeout duration; None for warn
     message: Optional[str] = None
     window_type: str = "rolling_7d"  # 'daily', 'weekly', 'session', 'rolling_7d'
+    game_name: Optional[str] = None  # None = applies to every tracked game individually
+    group_id: Optional[int] = None   # Set for group-scoped rules
 
 
 @dataclass
