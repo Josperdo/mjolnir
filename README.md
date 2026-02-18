@@ -1,21 +1,30 @@
-# Mjolnir - Work in Progress
+# Mjolnir
 **The Ban Hammer with a Stopwatch**
 
-Mjolnir is a Discord bot that tracks playtime for a target game (default: *League of Legends*) and enforces configurable limits with **automatic timeouts** instead of bans.
+Mjolnir is a Discord bot that tracks playtime across multiple games and enforces configurable limits with **automatic timeouts** instead of bans.
 
 ---
 
-## Current Features
+## Features
 
-- **Playtime Tracking** – Records how long opted-in members play the target game
+- **Multi-Game Tracking** – Track any number of games simultaneously; users opt individual games in or out
+- **Game Groups** – Set combined playtime limits across a group of games (e.g. LoL + Valorant + CS2)
 - **Graduated Timeouts** – Multiple escalating thresholds (warn, short timeout, long timeout)
 - **Multiple Time Windows** – Rolling 7-day, daily, calendar week, and per-session limits
+- **Game-Specific Rules** – Threshold rules can apply globally, to one game, or to a game group
 - **Public Roast Messages** – Threshold notifications posted publicly with randomized roast messages
-- **Playtime Visibility** – `/mystats` shows multi-window progress bars, upcoming thresholds, and active session info
+- **Custom Roast Messages** – Admins can replace the default roasts with their own
+- **Playtime Visibility** – `/mystats` shows multi-window progress bars, per-game breakdown, daily stats, session info, and upcoming thresholds
+- **Playtime History** – `/history` shows weekly/monthly trends, day-of-week patterns, and optional chart images
+- **Leaderboard** – `/leaderboard` shows server-wide rankings (most hours, longest session, most sessions)
 - **Consent-Based** – Users must `/opt-in` before tracking starts
-- **Admin Controls** – `/hammer on|off|status` to enable/disable tracking globally
+- **Privacy Controls** – `/privacy` lets users control leaderboard visibility; `/delete-my-data` removes everything
+- **Data Export** – `/export` downloads all stored data as JSON (GDPR-friendly)
+- **Admin Controls** – Full suite of `/hammer` commands for configuration, overrides, and auditing
+- **Weekly Recaps** – Scheduled DMs and shame leaderboard posts in the announcement channel
 - **SQLite Persistence** – Stores sessions, rules, and settings locally
 - **Dedup Tracking** – Threshold actions only fire once per window period
+- **Structured Logging** – All bot activity logged via Python's logging module
 
 ---
 
@@ -78,23 +87,55 @@ pytest tests/ -v
 ## Commands
 
 ### User Commands
-- `/opt-in` - Start tracking your playtime (shows threshold rules summary)
-- `/opt-out` - Stop tracking your playtime
-- `/mystats` - View playtime across all windows, progress bars, daily breakdown, session stats, warning/timeout history, and active session
-- `/leaderboard` - View server-wide playtime rankings for the last 7 days (opted-in users only)
+- `/opt-in` — Start tracking your playtime (shows current tracked games and threshold rules)
+- `/opt-out` — Stop tracking your playtime
+- `/mygames` — View all tracked games and toggle individual games on/off for yourself
+- `/mystats` — View playtime across all windows, progress bars, per-game breakdown, daily stats, session stats, warning/timeout history, and active session
+- `/leaderboard` — View server-wide playtime rankings for the last 7 days (opted-in users only)
+- `/history [period] [graph]` — View weekly or monthly playtime history, trends, and day-of-week patterns; optional chart image (requires matplotlib)
+- `/privacy` — Toggle your leaderboard visibility
+- `/export` — Download all your data as a JSON file
+- `/delete-my-data` — Permanently remove all your tracking data
 
 ### Admin Commands (Requires Administrator permission)
-- `/hammer on` - Enable playtime tracking globally
-- `/hammer off` - Disable playtime tracking globally
-- `/hammer status` - View bot status, threshold rules, and announcement channel config
-- `/hammer roasts list|add|remove` - Manage custom roast messages (overrides defaults)
-- `/hammer setschedule <day> <hour>` - Configure weekly recap schedule (DMs + shame board)
+- `/hammer on` — Enable playtime tracking globally
+- `/hammer off` — Disable playtime tracking globally
+- `/hammer status` — View bot status, tracked games, threshold rules, and announcement channel config
+- `/hammer setchannel <channel>` — Set the announcement channel for threshold alerts
+- `/hammer setgame <game>` — Change the legacy target game and register it in the tracking registry
+- `/hammer setschedule <day> <hour>` — Configure weekly recap schedule (DMs + shame board)
+- `/hammer pardon <user>` — Remove a user's timeout early
+- `/hammer exempt <user>` — Toggle a user's exemption from tracking (e.g. streamers)
+- `/hammer resetplaytime <user>` — Reset a user's playtime history and threshold events
+- `/hammer audit [count]` — View recent admin actions from the audit log
+
+#### Rules
+- `/hammer rules list` — View all threshold rules
+- `/hammer rules add <hours> <action> <window> [duration] [game] [group_id]` — Add a threshold rule (global, per-game, or per-group)
+- `/hammer rules remove <id>` — Remove a rule by ID
+
+#### Roasts
+- `/hammer roasts list` — View all custom roast messages
+- `/hammer roasts add <action> <message>` — Add a custom roast for warn or timeout events
+- `/hammer roasts remove <id>` — Remove a custom roast by ID
+
+#### Games
+- `/hammer games list` — List all tracked games with enabled/disabled status
+- `/hammer games add <game>` — Add a game to the tracking registry
+- `/hammer games remove <game>` — Remove a game from the tracking registry (history preserved)
+
+#### Groups
+- `/hammer groups list` — List all game groups and their members
+- `/hammer groups create <name>` — Create a new game group
+- `/hammer groups delete <group_id>` — Delete a game group
+- `/hammer groups addgame <group_id> <game>` — Add a game to a group
+- `/hammer groups removegame <group_id> <game>` — Remove a game from a group
 
 ---
 
 ## Default Threshold Rules
 
-Rules are seeded on first startup and stored in the database:
+Rules are seeded on first startup and stored in the database. They can be fully managed via `/hammer rules` commands:
 
 | Threshold | Window | Action | Duration |
 |-----------|--------|--------|----------|
@@ -103,158 +144,45 @@ Rules are seeded on first startup and stored in the database:
 | 20 hours | Rolling 7-day | Timeout | 6 hours |
 | 30 hours | Rolling 7-day | Timeout | 24 hours |
 
-Rules can be customized via direct database edits. Admin commands for rule CRUD are planned.
+Rules can be global (apply across all games), game-specific, or group-specific (combined playtime across multiple games).
 
 ### Announcement Channel
 
-Set `announcement_channel_id` in the settings table to a Discord channel ID. When configured, warnings and timeouts post publicly with `@mention` + a random roast message. Falls back to DM if not configured.
+Set an announcement channel via `/hammer setchannel`. When configured, warnings and timeouts post publicly with `@mention` + a random roast message. Falls back to DM if not configured.
 
 ---
 
 ## How It Works
 
 1. **Opt-in System:** Users run `/opt-in` to consent to tracking
-2. **Presence Monitoring:** Bot watches for when opted-in users play the target game
-3. **Session Tracking:** Records start/stop times automatically
+2. **Presence Monitoring:** Bot watches for when opted-in users play any tracked game
+3. **Per-Game Sessions:** Start/stop times recorded per game automatically
 4. **Multi-Window Limits:** Calculates playtime across rolling 7-day, daily, calendar week, and session windows
 5. **Graduated Enforcement:** When a threshold is crossed, the most severe new action is applied
-6. **Dedup Protection:** Each rule only fires once per window period (except session rules)
+6. **Dedup Protection:** Each rule only fires once per window period
 7. **Public Shaming:** Posts roast messages in the announcement channel with @mention
-8. **Reversible:** Timeouts expire automatically - no bans, no reinvites needed!
-
----
-
-## Development Roadmap
-
-### Phase 1: Core Functionality — COMPLETE
-**Goal:** Get basic tracking and timeouts working
-
-- [x] Bot connects to Discord with proper intents (Presence + Members)
-- [x] Tracks when opted-in users play target game via presence updates
-- [x] Records play sessions in SQLite database (start/stop times, duration)
-- [x] Applies timeout when user exceeds threshold
-- [x] Admin toggle tracking on/off globally (`/hammer on|off|status`)
-- [x] Users can opt-in/opt-out (`/opt-in`, `/opt-out`)
-- [x] Automatic timeout enforcement (not bans - easier to manage!)
-- [x] Basic DM notification on timeout
-- [x] User stats command (`/mystats`) with progress bar and live session tracking
-
----
-
-### Phase 2: Configuration & Multiple Thresholds — IN TESTING
-**Goal:** Make the bot flexible with graduated consequences
-
-**Graduated Timeout System**
-- [x] Multiple configurable thresholds instead of single 20h limit
-- [x] Default rules: 10h = warning, 15h = 1h timeout, 20h = 6h timeout, 30h = 24h timeout
-- [x] Store threshold rules in database (`threshold_rules` table)
-- [x] Each threshold has: hours, action (warn/timeout), duration, window type
-- [x] Dedup tracking via `threshold_events` table
-- [x] Public roast messages posted to announcement channel with @mention
-- [x] Fallback to DM when no announcement channel configured
-
-**Multiple Time Windows**
-- [x] Rolling 7-day window (existing behavior, now explicit)
-- [x] Daily limits (rolling 24h)
-- [x] Calendar week limits (Monday-Sunday)
-- [x] Session limits (per-session duration)
-- [x] `/mystats` shows progress across all active windows
-
-**Admin Configuration Commands**
-- [x] `/hammer rules list` - View all threshold rules
-- [x] `/hammer rules add <hours> <action> <duration> <window>` - Add a rule
-- [x] `/hammer rules remove <id>` - Remove a rule
-- [x] `/hammer setchannel` - Set announcement channel from Discord
-- [x] `/hammer setgame <game_name>` - Change target game
-
-**Manual Override Commands**
-- [x] `/hammer pardon <user>` - Remove user's timeout early
-- [x] `/hammer exempt <user>` - Toggle exemption from tracking (e.g., streamers)
-- [x] `/hammer resetplaytime <user>` - Reset user's playtime history and threshold events
-- [x] `/hammer audit` - View admin audit log for manual actions
-
-**Grace Periods & Warnings**
-- [x] Proactive warning messages before hitting next threshold
-- [x] "You've played 14h this week. At 15h, you'll get a 1h timeout."
-- [x] Cooldown system: Reset punishment tier after good behavior (configurable `cooldown_days`)
-- [x] Configurable warning threshold (e.g., warn at 90% of limit via `warning_threshold_pct`)
-
----
-
-### Phase 3: Cosmetic Features & Polish — IN PROGRESS
-**Goal:** Improve user experience and add fun features
-
-**User Stats & Dashboard**
-- [x] `/mystats` enhancements: daily breakdown, total session count, warning status
-- [x] `/leaderboard` - Server-wide playtime rankings (opt-in only)
-  - [x] Most hours played
-  - [x] Longest single session
-  - [x] Most frequent player
-
-**Enhanced Notifications**
-- [x] Admin-customizable roast messages (move from hardcoded to DB table)
-- [x] Weekly summary DMs
-- [x] Shame leaderboard / weekly recap posts in announcement channel
-
-**Historical Tracking & Analytics**
-- [x] `/history` - View your playtime over time
-- [x] Graph generation (weekly/monthly trends)
-- [x] Compare current week to previous weeks
-- [x] Identify patterns (e.g., "You play most on weekends")
-
-**Data Management**
-- [x] `/export` - Export your data as JSON (GDPR compliance)
-- [x] `/delete-my-data` - Remove all your tracking data
-- [x] Privacy controls per user
-
-**Multi-Game Support**
-- [x] Track multiple games with separate limits
-- [x] Game groups: Limit "competitive games" combined (LoL + Valorant + CS2)
-- [x] Per-game opt-in: Choose which games to track
-- [x] Game-specific thresholds
-
-**Infrastructure & Code Quality**
-- [ ] Comprehensive logging system (replace print statements with Python logging)
-- [ ] Error tracking and reporting
-- [ ] Admin notification on critical errors
-- [ ] Graceful degradation if Discord API is slow
-- [ ] Consider PostgreSQL for production (better concurrency)
-
----
-
-## Current Status
-
-- **Phase 1** — Complete
-- **Phase 2** — Complete
-- **Phase 3** — In Progress
-
----
-
-## Troubleshooting
-
-**Bot doesn't track presence:**
-- Ensure "Presence Intent" is enabled in Discord Developer Portal
-- Verify "Server Members Intent" is also enabled
-- Make sure users have run `/opt-in`
-
-**"Missing Permissions" errors:**
-- Bot needs "Timeout Members" permission
-- Grant the bot role appropriate permissions in Server Settings
-
-**Bot doesn't start:**
-- Check your `.env` file has the correct `DISCORD_BOT_TOKEN`
-- Verify Python 3.10+ is installed: `python --version`
+8. **Reversible:** Timeouts expire automatically — no bans, no reinvites needed!
 
 ---
 
 ## Database Schema
 
-The bot uses SQLite with these tables:
-- `users` - Tracks user opt-in status
-- `play_sessions` - Records individual play sessions
-- `settings` - Global bot configuration (includes `announcement_channel_id`)
-- `threshold_rules` - Graduated threshold rules (hours, action, duration, window type)
-- `threshold_events` - Dedup tracking for triggered thresholds
+The bot uses SQLite with the following tables:
+
+| Table | Purpose |
+|-------|---------|
+| `users` | User opt-in status, exemption, and privacy settings |
+| `play_sessions` | Individual play sessions (game, start time, end time, duration) |
+| `settings` | Global bot configuration (tracking toggle, channels, schedule, etc.) |
+| `threshold_rules` | Graduated threshold rules (hours, action, duration, window, game/group scope) |
+| `threshold_events` | Dedup tracking for triggered thresholds |
+| `tracked_games` | Registry of games the bot monitors |
+| `game_groups` | Named groups of games for combined playtime limits |
+| `game_group_members` | Membership mapping between groups and game names |
+| `user_game_exclusions` | Per-user opt-outs for individual tracked games |
+| `proactive_warnings` | Tracks sent proactive (pre-threshold) warnings |
+| `audit_log` | Admin action history (pardon, exempt, reset, etc.) |
+| `custom_roasts` | Admin-customizable roast messages for warn/timeout events |
 
 Database file: `mjolnir.db` (configurable via `DATABASE_PATH` in `.env`)
 
@@ -262,33 +190,35 @@ Database file: `mjolnir.db` (configurable via `DATABASE_PATH` in `.env`)
 
 ## License
 
-MIT License - See LICENSE file for details
+MIT License — See LICENSE file for details
 
 ---
 
 ## Design Decisions & Notes
 
 ### Why Timeouts Instead of Bans?
-- **Reversible** - Timeouts expire automatically, no manual unbanning needed
-- **No reinvites** - Users stay in the server, just can't participate temporarily
-- **Less punitive** - Better for friendly enforcement in gaming communities
-- **Native Discord feature** - Up to 28 days, built-in UI support
+- **Reversible** — Timeouts expire automatically, no manual unbanning needed
+- **No reinvites** — Users stay in the server, just can't participate temporarily
+- **Less punitive** — Better for friendly enforcement in gaming communities
+- **Native Discord feature** — Up to 28 days, built-in UI support
 
 ### Why Opt-In System?
-- **Privacy** - Users consent to being tracked
-- **Compliance** - GDPR-friendly approach
-- **Trust** - Users know exactly what's being monitored
+- **Privacy** — Users consent to being tracked
+- **Compliance** — GDPR-friendly approach
+- **Trust** — Users know exactly what's being monitored
 
 ### Why SQLite?
-- **Simple** - No external database server needed
-- **Portable** - Single file, easy backups
-- **Sufficient** - Handles small-medium Discord servers easily
-- **Upgradeable** - Can migrate to PostgreSQL later for large servers
+- **Simple** — No external database server needed
+- **Portable** — Single file, easy backups
+- **Sufficient** — Handles small-medium Discord servers easily
+- **Upgradeable** — Can migrate to PostgreSQL later for large servers
 
 ### Key Technical Choices
-- **Slash commands** - Modern Discord standard, better UX
-- **Presence monitoring** - Real-time tracking without polling
-- **Multiple time windows** - Rolling 7-day, daily, calendar week, and session limits
-- **Graduated thresholds** - Escalating consequences instead of a single hard cutoff
-- **Public roasts** - Fun accountability via announcement channel
-- **Dataclasses** - Clean, type-safe models
+- **Slash commands** — Modern Discord standard, better UX
+- **Presence monitoring** — Real-time tracking without polling
+- **Multiple time windows** — Rolling 7-day, daily, calendar week, and session limits
+- **Graduated thresholds** — Escalating consequences instead of a single hard cutoff
+- **Game groups** — Combined limits across related games without separate rules per game
+- **Public roasts** — Fun accountability via announcement channel
+- **Structured logging** — Python `logging` module throughout; `"app"` root logger, discord.py internals suppressed to WARNING
+- **Dataclasses** — Clean, type-safe models

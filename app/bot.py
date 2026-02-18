@@ -2,15 +2,18 @@
 Main bot initialization for Mjolnir.
 Handles bot setup, cog loading, and startup.
 """
+import logging
 import os
 import sys
-from pathlib import Path
 
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
+from app.core.logging import setup_logging
 from app.core.store import Database
+
+logger = logging.getLogger(__name__)
 
 
 class Mjolnir(commands.Bot):
@@ -36,55 +39,54 @@ class Mjolnir(commands.Bot):
 
     async def setup_hook(self):
         """Called when the bot is starting up. Load cogs here."""
-        # Load cogs
         await self.load_extension("app.cogs.admin")
         await self.load_extension("app.cogs.watcher")
 
-        # Sync slash commands with Discord
         await self.tree.sync()
-        print("✅ Slash commands synced")
+        logger.info("Slash commands synced")
 
     async def on_ready(self):
         """Called when the bot is ready and connected to Discord."""
-        print(f"🔨 Mjolnir is ready!")
-        print(f"   Logged in as: {self.user.name} ({self.user.id})")
-        print(f"   Connected to {len(self.guilds)} server(s)")
+        logger.info("Mjolnir is ready")
+        logger.info("Logged in as: %s (%d)", self.user.name, self.user.id)
+        logger.info("Connected to %d server(s)", len(self.guilds))
 
-        # Get settings to display status
         settings = self.db.get_settings()
         status = "ENABLED" if settings.tracking_enabled else "DISABLED"
-        print(f"   Tracking: {status}")
-        print(f"   Target game: {settings.target_game}")
-        print(f"   Weekly threshold: {settings.weekly_threshold_hours}h")
+        logger.info(
+            "Tracking: %s | Target game: %s | Weekly threshold: %sh",
+            status, settings.target_game, settings.weekly_threshold_hours,
+        )
 
     async def close(self):
         """Cleanup when bot shuts down."""
-        print("🛑 Shutting down Mjolnir...")
+        logger.info("Shutting down Mjolnir")
         self.db.close()
         await super().close()
 
 
 def main():
     """Entry point for the bot."""
-    # Load environment variables
     load_dotenv()
+    setup_logging()
 
-    # Check for required token
     token = os.getenv("DISCORD_BOT_TOKEN")
     if not token:
-        print("❌ Error: DISCORD_BOT_TOKEN not found in environment variables")
-        print("   Please create a .env file with your bot token")
+        logger.critical(
+            "DISCORD_BOT_TOKEN not found in environment variables — "
+            "create a .env file with your bot token"
+        )
         sys.exit(1)
 
-    # Create and run bot
     bot = Mjolnir()
 
     try:
-        bot.run(token)
+        # log_handler=None prevents discord.py from adding its own handler
+        bot.run(token, log_handler=None)
     except KeyboardInterrupt:
-        print("\n⚠️  Received shutdown signal")
+        logger.info("Received shutdown signal")
     except Exception as e:
-        print(f"❌ Fatal error: {e}")
+        logger.critical("Fatal error: %s", e, exc_info=True)
         raise
 
 

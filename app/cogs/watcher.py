@@ -2,6 +2,7 @@
 Watcher cog for Mjolnir.
 Monitors user presence and tracks playtime for all configured games.
 """
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
@@ -10,6 +11,8 @@ from discord.ext import commands, tasks
 
 from app.core.models import PlaySession, ThresholdRule
 from app.core.rules import evaluate_rules, get_highest_action, get_roast
+
+logger = logging.getLogger(__name__)
 
 
 def _group_by_window(rules: List[ThresholdRule]) -> Dict[str, List[ThresholdRule]]:
@@ -90,7 +93,7 @@ class Watcher(commands.Cog):
             return  # Already tracking this game
 
         session = self.db.start_session(member.id, game_name)
-        print(f"Started tracking {member.name} playing {game_name} (Session ID: {session.id})")
+        logger.info("Started tracking %s playing %s (session #%d)", member.name, game_name, session.id)
 
     async def _handle_game_stop(self, member: discord.Member, game_name: str):
         """Handle when a user stops playing a tracked game."""
@@ -102,8 +105,8 @@ class Watcher(commands.Cog):
         if not completed_session:
             return
 
-        print(f"Stopped tracking {member.name} playing {game_name} "
-              f"(Duration: {completed_session.duration_hours:.2f}h)")
+        logger.info("Stopped tracking %s playing %s (duration: %.2fh)",
+                    member.name, game_name, completed_session.duration_hours)
 
         await self._check_threshold(member, completed_session)
 
@@ -204,7 +207,7 @@ class Watcher(commands.Cog):
         if last_event_time < cutoff:
             cleared = self.db.clear_threshold_events(user_id)
             if cleared:
-                print(f"Cooldown: cleared {cleared} threshold events for user {user_id}")
+                logger.info("Cooldown: cleared %d threshold events for user %d", cleared, user_id)
 
     async def _check_proactive_warnings(
         self,
@@ -286,13 +289,13 @@ class Watcher(commands.Cog):
                 timeout_duration,
                 reason=f"Playtime threshold exceeded ({rule.hours}h {rule.window_type}{game_label})"
             )
-            print(f"Timed out {member.name} for {rule.duration_hours}h "
-                  f"(rule: {rule.hours}h {rule.window_type}{game_label})")
+            logger.info("Timed out %s for %dh (rule: %sh %s%s)",
+                        member.name, rule.duration_hours, rule.hours, rule.window_type, game_label)
         except discord.Forbidden:
-            print(f"Failed to timeout {member.name} (missing permissions)")
+            logger.warning("Failed to timeout %s (missing permissions)", member.name)
             return
         except discord.HTTPException as e:
-            print(f"Failed to timeout {member.name}: {e}")
+            logger.error("Failed to timeout %s: %s", member.name, e)
             return
 
         embed = discord.Embed(title="Timeout Notice", color=discord.Color.red())
@@ -312,7 +315,7 @@ class Watcher(commands.Cog):
         try:
             await member.send(f"{roast}", embed=embed)
         except discord.Forbidden:
-            print(f"Could not DM {member.name}")
+            logger.warning("Could not DM timeout notice to %s", member.name)
 
     async def _send_warning(self, member: discord.Member, rule: ThresholdRule,
                             game_name: str = ""):
@@ -336,7 +339,7 @@ class Watcher(commands.Cog):
         try:
             await member.send(f"{roast}", embed=embed)
         except discord.Forbidden:
-            print(f"Could not DM {member.name}")
+            logger.warning("Could not DM warning to %s", member.name)
 
     async def _send_proactive_warning(self, member: discord.Member, rule: ThresholdRule,
                                       playtime: float, game_name: Optional[str] = None):
@@ -363,10 +366,10 @@ class Watcher(commands.Cog):
 
         try:
             await member.send(message)
-            print(f"Proactive warning sent to {member.name}: "
-                  f"{playtime:.1f}h / {rule.hours}h {rule.window_type}")
+            logger.info("Proactive warning sent to %s: %.1fh / %sh %s",
+                        member.name, playtime, rule.hours, rule.window_type)
         except discord.Forbidden:
-            print(f"Could not DM proactive warning to {member.name}")
+            logger.warning("Could not DM proactive warning to %s", member.name)
 
     # ===== Weekly Recap =====
 
@@ -390,7 +393,7 @@ class Watcher(commands.Cog):
         await self._send_shame_leaderboard()
 
         self.db.update_settings(last_weekly_recap_at=now)
-        print(f"Weekly recap sent at {now.strftime('%Y-%m-%d %H:%M UTC')}")
+        logger.info("Weekly recap sent at %s", now.strftime("%Y-%m-%d %H:%M UTC"))
 
     @weekly_recap_loop.before_loop
     async def before_weekly_recap(self):
@@ -455,7 +458,7 @@ class Watcher(commands.Cog):
         try:
             await channel.send(embed=embed)
         except (discord.Forbidden, discord.HTTPException):
-            print("Failed to post weekly shame leaderboard")
+            logger.warning("Failed to post weekly shame leaderboard")
 
 
 async def setup(bot):

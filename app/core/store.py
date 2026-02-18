@@ -97,6 +97,16 @@ class Database:
             ON threshold_events(user_id, rule_id, triggered_at)
         """)
 
+        # Tracked games registry
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tracked_games (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_name TEXT NOT NULL UNIQUE,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                added_at TIMESTAMP NOT NULL
+            )
+        """)
+
         # Insert default settings if not exists
         cursor.execute("""
             INSERT OR IGNORE INTO settings (id) VALUES (1)
@@ -149,16 +159,6 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 action TEXT NOT NULL,
                 message TEXT NOT NULL
-            )
-        """)
-
-        # Tracked games registry
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS tracked_games (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                game_name TEXT NOT NULL UNIQUE,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                added_at TIMESTAMP NOT NULL
             )
         """)
 

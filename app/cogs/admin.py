@@ -4,12 +4,16 @@ Provides commands for users to opt-in/out and admins to control the bot.
 """
 import io
 import json
+import logging
+
 import discord
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from discord import app_commands
 from discord.ext import commands
+
+logger = logging.getLogger(__name__)
 
 
 # Display labels for window types
@@ -119,7 +123,7 @@ class DeleteDataView(discord.ui.View):
             ),
             view=None,
         )
-        print(f"User {self.user_id} permanently deleted their data")
+        logger.info("User %d permanently deleted their data", self.user_id)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -206,7 +210,7 @@ class Admin(commands.Cog):
             ephemeral=True
         )
 
-        print(f"{interaction.user.name} opted in to tracking")
+        logger.info("%s opted in to tracking", interaction.user.name)
 
     @app_commands.command(name="opt-out", description="Opt out of playtime tracking")
     async def opt_out(self, interaction: discord.Interaction):
@@ -221,7 +225,7 @@ class Admin(commands.Cog):
             ephemeral=True
         )
 
-        print(f"{interaction.user.name} opted out of tracking")
+        logger.info("%s opted out of tracking", interaction.user.name)
 
     @app_commands.command(name="export", description="Export your data as JSON (GDPR compliance)")
     async def export(self, interaction: discord.Interaction):
@@ -250,7 +254,7 @@ class Admin(commands.Cog):
             file=file,
             ephemeral=True,
         )
-        print(f"{interaction.user.name} exported their data")
+        logger.info("%s exported their data", interaction.user.name)
 
     @app_commands.command(name="delete-my-data", description="Permanently remove all your tracking data")
     async def delete_my_data(self, interaction: discord.Interaction):
@@ -762,7 +766,7 @@ class Admin(commands.Cog):
                 f"Monitoring: **{settings.target_game}**",
                 ephemeral=False
             )
-            print("Tracking enabled by admin")
+            logger.info("Tracking enabled by %s", interaction.user.name)
 
     @hammer.command(name="off", description="Disable playtime tracking")
     async def hammer_off(self, interaction: discord.Interaction):
@@ -782,7 +786,7 @@ class Admin(commands.Cog):
                 "Active sessions will not be tracked.",
                 ephemeral=False
             )
-            print("Tracking disabled by admin")
+            logger.info("Tracking disabled by %s", interaction.user.name)
 
     @hammer.command(name="status", description="View Mjolnir's current status and configuration")
     async def hammer_status(self, interaction: discord.Interaction):
@@ -883,7 +887,7 @@ class Admin(commands.Cog):
             f"Announcement channel set to {channel.mention}.",
             ephemeral=True
         )
-        print(f"Announcement channel set to #{channel.name} by admin")
+        logger.info("Announcement channel set to #%s by %s", channel.name, interaction.user.name)
 
     # ----- /hammer setgame -----
 
@@ -905,7 +909,7 @@ class Admin(commands.Cog):
             f"Use `/hammer games list` to see all tracked games.",
             ephemeral=True
         )
-        print(f"Target game changed to '{game}' by admin")
+        logger.info("Target game changed to '%s' by %s", game, interaction.user.name)
 
     # ----- /hammer rules list -----
 
@@ -1042,7 +1046,7 @@ class Admin(commands.Cog):
             f"Rule `#{rule.id}` added to **{label}**:\n{desc}",
             ephemeral=True
         )
-        print(f"Threshold rule #{rule.id} added by admin")
+        logger.info("Threshold rule #%d added by %s", rule.id, interaction.user.name)
 
     # ----- /hammer rules remove -----
 
@@ -1057,7 +1061,7 @@ class Admin(commands.Cog):
                 f"Rule `#{rule_id}` has been removed.",
                 ephemeral=True
             )
-            print(f"Threshold rule #{rule_id} removed by admin")
+            logger.info("Threshold rule #%d removed by %s", rule_id, interaction.user.name)
         else:
             await interaction.response.send_message(
                 f"No rule found with ID `#{rule_id}`.",
@@ -1102,7 +1106,7 @@ class Admin(commands.Cog):
             f"Opted-in users will have their sessions recorded automatically.",
             ephemeral=True,
         )
-        print(f"Tracked game '{tg.game_name}' added by admin")
+        logger.info("Tracked game '%s' added by %s", tg.game_name, interaction.user.name)
 
     @games.command(name="remove", description="Remove a game from the tracking registry")
     @app_commands.describe(game="The game name to stop tracking")
@@ -1115,7 +1119,7 @@ class Admin(commands.Cog):
                 f"Existing session history is preserved.",
                 ephemeral=True,
             )
-            print(f"Tracked game '{game}' removed by admin")
+            logger.info("Tracked game '%s' removed by %s", game, interaction.user.name)
         else:
             await interaction.response.send_message(
                 f"No tracked game matching **{game}** was found.", ephemeral=True
@@ -1156,7 +1160,7 @@ class Admin(commands.Cog):
                 f"Add games with `/hammer groups addgame {grp.id} <game>`.",
                 ephemeral=True,
             )
-            print(f"Game group '{grp.group_name}' created by admin")
+            logger.info("Game group '%s' created by %s", grp.group_name, interaction.user.name)
         except Exception:
             await interaction.response.send_message(
                 f"A group named **{name}** already exists.", ephemeral=True
@@ -1176,7 +1180,7 @@ class Admin(commands.Cog):
         await interaction.response.send_message(
             f"Group **{grp.group_name}** (`#{group_id}`) deleted.", ephemeral=True
         )
-        print(f"Game group #{group_id} deleted by admin")
+        logger.info("Game group #%d deleted by %s", group_id, interaction.user.name)
 
     @groups.command(name="addgame", description="Add a game to a group")
     @app_commands.describe(group_id="The group ID", game="Game name to add")
@@ -1277,7 +1281,7 @@ class Admin(commands.Cog):
             f"Roast `#{roast.id}` added for **{action}**:\n{message}",
             ephemeral=True
         )
-        print(f"Custom roast #{roast.id} added by admin")
+        logger.info("Custom roast #%d added by %s", roast.id, interaction.user.name)
 
     # ----- /hammer roasts remove -----
 
@@ -1292,7 +1296,7 @@ class Admin(commands.Cog):
                 f"Roast `#{roast_id}` has been removed.",
                 ephemeral=True
             )
-            print(f"Custom roast #{roast_id} removed by admin")
+            logger.info("Custom roast #%d removed by %s", roast_id, interaction.user.name)
         else:
             await interaction.response.send_message(
                 f"No roast found with ID `#{roast_id}`.",
@@ -1338,7 +1342,7 @@ class Admin(commands.Cog):
             f"Weekly recap set to **{day_name}** at **{hour:02d}:00 UTC**.",
             ephemeral=True
         )
-        print(f"Weekly recap schedule set to {day_name} {hour:02d}:00 UTC by admin")
+        logger.info("Weekly recap schedule set to %s %02d:00 UTC by %s", day_name, hour, interaction.user.name)
 
     # ===== Manual Override Commands =====
 
@@ -1376,7 +1380,7 @@ class Admin(commands.Cog):
             f"{user.mention} has been pardoned. Their timeout has been removed.",
             ephemeral=True
         )
-        print(f"{user.name} pardoned by {interaction.user.name}")
+        logger.info("%s pardoned by %s", user.name, interaction.user.name)
 
     # ----- /hammer exempt -----
 
@@ -1412,7 +1416,7 @@ class Admin(commands.Cog):
                 f"{user.mention} is no longer exempt from tracking.",
                 ephemeral=True
             )
-        print(f"{user.name} {action}ed by {interaction.user.name}")
+        logger.info("%s %sed by %s", user.name, action, interaction.user.name)
 
     # ----- /hammer resetplaytime -----
 
@@ -1441,7 +1445,7 @@ class Admin(commands.Cog):
             f"**{events_cleared}** threshold events.",
             ephemeral=True
         )
-        print(f"Playtime reset for {user.name} by {interaction.user.name}")
+        logger.info("Playtime reset for %s by %s", user.name, interaction.user.name)
 
     # ----- /hammer audit -----
 
