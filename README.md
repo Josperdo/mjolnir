@@ -213,12 +213,6 @@ Set `announcement_channel_id` in the settings table to a Discord channel ID. Whe
 - [x] Per-game opt-in: Choose which games to track
 - [x] Game-specific thresholds
 
-**Advanced Features** (Nice-to-have)
-- [ ] Integration with Riot Games API for match history
-- [ ] Productivity rewards: Reduce timeout if user joins study channels
-- [ ] Scheduled breaks: Auto-enable stricter limits during exam weeks
-- [ ] Buddy system: Users set accountability partners who get notified
-
 **Infrastructure & Code Quality**
 - [ ] Comprehensive logging system (replace print statements with Python logging)
 - [ ] Error tracking and reporting
